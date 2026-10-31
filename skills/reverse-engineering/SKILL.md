@@ -28,8 +28,8 @@ The task constraint and the task schema win over every later section, including 
 Every reverse engineering workflow, regardless of target architecture or execution environment, is strictly governed by 11 binding rules. These operational constraints are authoritative and must be adhered to at every step:
 
 1. **[Triage-First Gate](rules/01-triage-first.md)**:
-   - **Mandate**: Invoking any decompiler (IDA Pro, Ghidra), disassembler, or dynamic debugger before generating a verified `<target_triage_manifest>` via `auto_triage.py` or format headers is strictly prohibited.
-   - **Enforcement**: Immediate rejection of premature decompilation; triage manifest must confirm format, architecture, toolchain/compiler signatures, section entropy, and high-level imports.
+   - **Mandate**: Invoking any decompiler (IDA Pro, Ghidra), disassembler, or dynamic debugger before a triage manifest (`uv run scripts/auto_triage.py "$ARTIFACT"` JSON plus format headers, saved under `triage` in `re_state.json`) is strictly prohibited.
+   - **Enforcement**: Immediate rejection of premature decompilation; triage manifest must confirm SHA-256, format, architecture, toolchain/runtime markers, entropy and packer indicators, and the import/export surface (or its recorded parse failure).
 
 2. **[Progressive Disclosure](rules/02-progressive-disclosure.md)**:
    - **Mandate**: After triage, load strictly the single matching domain reference recommended by the scanner.
@@ -38,16 +38,16 @@ Every reverse engineering workflow, regardless of target architecture or executi
 
 3. **[Context Hygiene](rules/03-context-hygiene.md)**:
    - **Mandate**: Dumping raw decompiler pseudocode, large disassembly blocks, full memory maps, or raw trace logs exceeding 300–400 lines into the main conversational context window is strictly forbidden.
-   - **Discipline**: Offload full output to `.re_scratch/<func_name>.c` or `.re_scratch/<func_name>.asm`. Retain only the prototype, prologue (50 lines), epilogue (50 lines), critical strings/constants, and direct callees in context. Delegate massive subroutines to bounded subagents.
+   - **Discipline**: Offload full output to `.re_scratch/<func_name>.c` or `.re_scratch/<func_name>.asm`. Retain only the prototype, prologue (50 lines), epilogue (50 lines), critical strings/constants, and direct callees in context. Delegate massive subroutines to bounded subagents. Ghidra projects cannot live under a dot-prefixed directory; keep them in `re_ghidra/` and export into `.re_scratch/`.
 
 4. **[Static ↔ Dynamic Loop](rules/04-static-dynamic-loop.md)**:
    - **Mandate**: Static analysis is foundational and must precede dynamic execution. Transition to dynamic analysis strictly when blocked by heavy packing/encryption (entropy > 7.2), ephemeral runtime values (decrypted buffers, dynamic APIs), or falsifiable hypothesis validation.
    - **Discipline**: Dynamic analysis is an ephemeral probe. Upon capturing runtime data, immediately teardown tracing, re-anchor captured values to static disassembly, rename symbols, define structs, and persist findings to `re_state.json`.
 
 5. **[Dynamic Analysis Discipline](rules/05-dynamic-discipline.md)**:
-   - **Mandate**: Dynamic execution must execute strictly in non-interactive batch or script mode. Interactive REPLs (manual GDB, WinDbg prompts, x64dbg GUI, Frida CLI) are strictly forbidden.
-   - **Hard Timeouts**: Enforce explicit timeouts on every dynamic invocation (e.g. `timeout 15s gdb -batch ...`).
-   - **Frida Discipline**: Scripts must hook target routines, transmit structured telemetry via `send()`, detach via `Interceptor.detachAll()`, and exit deterministically. Prefer lightweight memory patching or OEP dumping over prolonged anti-debug stepping.
+   - **Mandate**: Dynamic execution runs in non-interactive batch or script mode only: `gdb -batch -x`, `lldb --batch -s`, `frida -l hook.js -q -t 30 --kill-on-exit`, the Frida Python API with a timer, or `ida/re_dbg.py` through ida-mcp. An interactive prompt waiting for input (bare gdb, lldb, cdb, or Frida REPL, x64dbg GUI clicking) is forbidden.
+   - **Hard Timeouts**: Every dynamic invocation has a wall-clock bound: `timeout 30 ...` on Linux, Homebrew `timeout`/`gtimeout` or a Python `subprocess` timeout on macOS, `Wait-Job -Timeout` on Windows.
+   - **Frida Discipline**: Scripts hook named targets, report through `send()`, call `Interceptor.detachAll()`, then `send({type: "done"})`; the harness detaches and kills (a script cannot exit the process). Under Frida 17, `Java`/`ObjC` exist only in the CLI or when the bridge is bundled. Prefer lightweight memory patching or OEP dumping over prolonged anti-debug stepping.
 
 6. **[State Management](rules/06-state-management.md)**:
    - **Mandate**: Maintain an authoritative JSON state ledger (`re_state.json`) throughout the engagement. Persist state after every significant step rather than relying on volatile conversational context.
@@ -68,7 +68,9 @@ Every reverse engineering workflow, regardless of target architecture or executi
      3. Dumping 300+ lines of raw assembly or decompiled code into prompt context.
      4. Running binary or dynamic commands without hard process timeouts.
      5. Disregarding compiler markers (Go `pclntab`, Rust panic handlers, C++ RTTI).
-     6. Making capability-negative claims based on packed or sparse import tables.
+     6. Executing an untrusted sample outside containment, or with live egress.
+     7. Treating an exit code of 0, empty output, or a silent scanner as a negative result.
+     8. Making capability-negative claims based on packed or sparse import tables.
 
 10. **[Subagent Delegation](rules/10-subagent-delegation.md)**:
     - **Mandate**: Delegate complex, high-volume tasks to dedicated subagents: decompiler output exceeding 400 lines, complex nested data structures/vtables, and heavy algorithmic/crypto reconstruction.
@@ -305,7 +307,7 @@ For a full matrix of CLI options, tool strengths, and fallback engines across ID
 ## Helper Scripts
 
 Executable helper scripts located in `scripts/`:
-- `auto_triage.py`: Fast file header, magic bytes, and compiler signature scanner.
+- `auto_triage.py`: File magic, runtime and packer markers, entropy, SHA-256, and a bounded import/export surface (LIEF). Prints JSON and names the matching reference.
 - `dump_memory.py`: Live process memory segment extractor for Linux (`/proc/<pid>/mem`) and macOS core dumper.
 - `elf_triage.py`: Program header, segment LOAD delta, and section VMA inspector for ELF binaries.
 - `elf_symbols.py`: Application entrypoint and symbol boundary classifier.

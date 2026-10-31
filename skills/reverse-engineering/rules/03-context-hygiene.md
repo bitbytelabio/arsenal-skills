@@ -16,6 +16,7 @@ When inspecting functions or trace outputs larger than 300 lines:
      - Critical intermediate lines containing relevant string references, crypto constants, or system calls.
      - Last 50 lines (epilogue, return value calculations, error handling).
      - Direct callee invocation summary.
+   - Ghidra refuses any project path with a component that starts with `.` (`Path element starting with '.' is not permitted`). Keep Ghidra projects in a plain directory such as `re_ghidra/` or a temp directory, and write only exports into `.re_scratch/`. IDA databases (`.i64`) have no such limit.
 3. **Subagent Delegation for Deep Traces**:
    - For subroutines with excessive cyclomatic complexity or high line counts, delegate step-by-step branch analysis to a bounded subagent operating directly against the `.re_scratch/` file.
 

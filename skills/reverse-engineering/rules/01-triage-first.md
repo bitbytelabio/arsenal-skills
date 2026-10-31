@@ -1,7 +1,7 @@
 # Rule 1: Mandatory Triage-First Gate
 
 ## Mandate
-It is **STRICTLY FORBIDDEN** to invoke any decompiler (IDA Pro, Ghidra, Binary Ninja), disassembler, or dynamic debugger on an artifact before obtaining or generating a valid `<target_triage_manifest>` via `scripts/auto_triage.py` (or format-specific pre-triage tools such as `file`, `rabin2 -I`, `readelf`, `dumpbin`).
+It is **STRICTLY FORBIDDEN** to invoke any decompiler (IDA Pro, Ghidra, Binary Ninja), disassembler, or dynamic debugger on an artifact before a triage manifest exists. The manifest is the JSON printed by `uv run scripts/auto_triage.py "$ARTIFACT"`, plus format-specific output from `file`, `rabin2 -I`, `readelf -h -l`, or `uv run scripts/elf_triage.py`, saved under `triage` in `re_state.json`.
 
 ## Rationale
 Jumping directly to decompile an uncharacterized entry point or `main` without establishing foundational binary attributes violates core reverse engineering principles:
@@ -10,22 +10,22 @@ Jumping directly to decompile an uncharacterized entry point or `main` without e
 3. **Format Blindness**: Operating without architecture (x86_64, AArch64, MIPS, ARM Thumb), endianness, and binary format specifics leads to incorrect calling conventions and register assignments.
 
 ## Enforcement
-- **Pre-Hook Validation**: Before executing any disassembler/decompiler command (`ida64`, `ghidra`, `cutter`, `objdump`, `radare2`), the agent must check for the presence of a triage manifest in `re_state.json` or as raw execution output from `auto_triage.py`.
+- **Pre-Hook Validation**: Before any disassembler or decompiler call (ida-mcp `open_database`, `idat`, `analyzeHeadless`, `r2 -A`, `objdump -d`), check that `re_state.json` has a `triage` block for this exact SHA-256.
 - **Immediate Rejection**: Any instruction or sub-task directing decompilation prior to artifact characterization must be rejected immediately, pivoting back to triage execution:
   ```bash
-  uv run scripts/auto_triage.py <target_path>
+  uv run scripts/auto_triage.py "$ARTIFACT"
   ```
-- **Manifest Requirements**: The triage manifest must confirm:
-  - Sample identity: SHA-256, path, format (`ELF`, `PE`, `Mach-O`, `DEX`, `WASM`, `Firmware`).
-  - Target architecture and bitness (`x86_64`, `aarch64`, etc.).
-  - Toolchain and runtime markers (`Go`, `Rust`, `MSVC`, `GCC/Clang`, `.NET`, `JVM`). NativeAOT is native code, not a dnSpy/IL target.
-  - Section entropy and packer indicators (UPX, Themida, VMProtect, custom stub).
-  - High-level import/export overview, or the recorded failure to parse them.
+- **Manifest Requirements**: The triage manifest must confirm the items below. The `auto_triage.py` field that supplies each one is in brackets; add the rest by hand.
+  - Sample identity: SHA-256 [`sha256`], path [`file`], format [`format`].
+  - Target architecture and bitness [`architecture`]. For a fat Mach-O, name the slice you will analyze.
+  - Toolchain and runtime markers [`runtime`, `indicators`]: Go, Rust, MSVC, GCC/Clang, .NET, JVM, Unity, Flutter, Hermes. Add the version by hand when a marker gives it (Go buildinfo, Rust `rustc` path, Dart snapshot hash). NativeAOT is native code, not a dnSpy/IL target.
+  - Entropy and packer indicators [`entropy`, `is_packed`, `packer`]. The script reports whole-file entropy. Per-section entropy comes from `rabin2 -S` with `binwalk -E`, or from LIEF.
+  - Import/export overview [`surface`: libraries, delay-load libraries, counts, and the first 30 names], or the recorded parse failure [`surface.error`].
 
 ## Thin Surface
 An empty ASCII string list or a tiny import table is not the end of triage. Before calling the surface empty, record which of these were checked:
 
-- **Wide and decoded strings**: UTF-16 (`strings -el` or the decompiler's Unicode view) and a decoded-string pass (`floss` or equivalent) when ASCII strings are absent.
+- **Wide and decoded strings**: UTF-16LE strings (GNU `strings -el`; macOS `strings` has no `-e`, so use `floss`, `rabin2 -zz`, or a Python scan) and a decoded-string pass (`floss`) when ASCII strings are absent.
 - **Packing structure**: a section with raw size near 0 and a large virtual size; a section that is writable and executable; an entry point outside the first section; a TLS directory.
 - **Trailing and embedded payloads**: file size larger than the sum of raw section sizes (overlay); a high-entropy resource such as `RT_RCDATA`.
 - **Late binding**: delay-load imports, or a proxy DLL whose exports mirror a system DLL while the sample loads the real DLL beside it.

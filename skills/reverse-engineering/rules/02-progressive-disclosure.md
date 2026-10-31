@@ -35,9 +35,17 @@ The reference repository follows a strict stage-gate hierarchy:
    - Artifact schema verification: `references/03-objectives/static-artifact-contract.md`
    - Desktop thick client: `references/03-objectives/thick-client.md`
    - Recognized field shape: `references/03-objectives/case-patterns.md`
-4. `references/05-environment/`: Load when the task is host detection, tool install, a rooted emulator, a proxy CA, or VM provisioning. This does not replace the architecture reference.
+4. `references/04-tool-usage/`: Load the one guide for the tool you are about to drive, after the architecture reference has named that tool:
+   - IDA through official `ida-mcp`: `references/04-tool-usage/ida-pro.md`
+   - IDA remote debugging through `ida-mcp` and `ida/re_dbg.py`: `references/04-tool-usage/ida-mcp-remote-debugging.md`
+   - Ghidra headless, PyGhidra, REA: `references/04-tool-usage/rea-ghidra.md`
+   - Frida CLI, Python API, frida-compile, Gadget: `references/04-tool-usage/frida.md`
+   - Apple firmware, kernelcache, dyld cache: `references/04-tool-usage/ipsw.md`
+   - UTM VM lifecycle: `references/04-tool-usage/utm-hypervisor.md`
+   - Browser and JS dynamic engine: `references/04-tool-usage/jshook-mcp.md`
+5. `references/05-environment/`: Load when the task is host detection, tool install, a rooted emulator, a proxy CA, or VM provisioning. This does not replace the architecture reference.
 
 ## Prohibition
 A path saved in a ledger, including `recommended_reference`, is not identification. Confirm the format from the file bytes before opening that reference.
 
-Never preload multiple domain references simultaneously under speculative "just-in-case" assumptions. Simultaneous preloading is permitted only when concrete triage evidence demonstrates a hybrid multi-runtime target (e.g. Unity IL2CPP using both `unity-il2cpp.md` and `native-cpp-abi.md`, or an Electron desktop application combining Node.js native addons with Chromium V8).
+Never preload multiple domain references simultaneously under speculative "just-in-case" assumptions. Simultaneous preloading is permitted only when concrete triage evidence demonstrates a hybrid multi-runtime target (e.g. Unity IL2CPP using both `unity-il2cpp.md` and `native-cpp-abi.md`; an APK whose `lib/` holds `libil2cpp.so`, `libflutter.so`, or a Hermes bundle, using `android-apk.md` plus that runtime file; or an Electron application with native addons, using `browser-js-wasm.md` plus the addon's native reference).

@@ -400,7 +400,7 @@ bytenode saves V8 code cache from `vm.Script` `produceCachedData`. Function bodi
 
 - The cache is tied to one V8 version and flag set. Get the version from the host binary (`node -p process.versions.v8`, or Electron's version from `Info.plist`/`process.versions`).
 - View8 (`suleram/View8`) decompiles serialized V8 objects using a d8 build matched to that version. `ghidra_nodejs` is archived and supports only old Node 8-era bytecode.
-- Strings and property names survive in the constant pool. `strings -el`/`strings` on the `.jsc` is a fast first look.
+- Strings and property names survive in the constant pool. GNU `strings -el` (or `rabin2 -zz` on macOS) on the `.jsc` is a fast first look.
 - Electron `LoadBrowserProcessSpecificV8Snapshot` and custom snapshots (`v8_context_snapshot.bin`) can hold app code. Check the fuse before assuming all code is in the asar.
 
 ## WebAssembly

@@ -15,6 +15,7 @@ signatures and recommend appropriate progressive disclosure references.
 
 import argparse
 import collections
+import hashlib
 import json
 import math
 import mimetypes
@@ -362,6 +363,57 @@ def inspect_tar_container(filepath: str, result: dict) -> bool:
             return True
     except Exception:
         return False
+
+
+SURFACE_LIMIT = 30
+
+
+def sha256_file(filepath: str) -> str:
+    digest = hashlib.sha256()
+    with open(filepath, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def binary_surface(filepath: str) -> dict | None:
+    """Bounded import/export summary for ELF, PE, and Mach-O (first slice of a fat file).
+
+    Returns None for non-native files. A parse failure is reported, not hidden:
+    Rule 1 needs either the overview or the recorded failure.
+    """
+    lief.logging.disable()
+    try:
+        if lief.is_macho(filepath):
+            fat = lief.MachO.parse(filepath)
+            binary = fat.at(0) if fat is not None and fat.size else None
+        elif lief.is_elf(filepath) or lief.is_pe(filepath):
+            binary = lief.parse(filepath)
+        else:
+            return None
+    except Exception as exc:  # lief raises on truncated or hostile headers
+        return {"error": f"lief parse failed: {exc}"}
+    if binary is None:
+        return {"error": "lief could not parse the headers"}
+
+    imports = [f.name for f in binary.imported_functions if f.name]
+    exports = [f.name for f in binary.exported_functions if f.name]
+    if isinstance(binary, lief.PE.Binary):
+        libraries = [lib.name for lib in binary.imports]
+        delay = [lib.name for lib in binary.delay_imports] if binary.has_delay_imports else []
+    else:
+        # ELF yields names, Mach-O yields DylibCommand objects.
+        libraries = [getattr(lib, "name", lib) for lib in binary.libraries]
+        delay = []
+    return {
+        "libraries": libraries[:SURFACE_LIMIT],
+        "delay_load_libraries": delay[:SURFACE_LIMIT],
+        "import_count": len(imports),
+        "export_count": len(exports),
+        "imports_sample": imports[:SURFACE_LIMIT],
+        "exports_sample": exports[:SURFACE_LIMIT],
+        "truncated": len(imports) > SURFACE_LIMIT or len(exports) > SURFACE_LIMIT or len(libraries) > SURFACE_LIMIT,
+    }
 
 
 def triage_file(filepath: str) -> dict:
@@ -860,6 +912,11 @@ def main():
     parser.add_argument("--json", action="store_true", help="accepted for compatibility; output is always JSON")
     args = parser.parse_args()
     res = triage_file(args.artifact)
+    if "error" not in res:
+        res["sha256"] = sha256_file(args.artifact)
+        surface = binary_surface(args.artifact)
+        if surface is not None:
+            res["surface"] = surface
     print(json.dumps(res, indent=2))
 
 

@@ -13,10 +13,15 @@ Maintain an authoritative, structured JSON state file (`re_state.json`) in the p
     "format": "ELF64",
     "architecture": "x86_64",
     "toolchain": "Go 1.21",
+    "entropy": 5.91,
     "is_packed": false,
     "entry_point": "0x452000",
+    "surface": {"import_count": 0, "libraries": [], "note": "static Go binary; imports resolved by runtime"},
     "egress": "offline"
   },
+  "questions": [
+    {"id": "Q-1", "text": "How is the configuration blob decrypted?", "status": "partial"}
+  ],
   "hypotheses": [
     {
       "id": "H-001",
@@ -63,6 +68,9 @@ Maintain an authoritative, structured JSON state file (`re_state.json`) in the p
       "why_stopped": "Path explosion in the dispatcher; no new observation."
     }
   ],
+  "handoffs": [
+    {"stage": "static->dynamic", "decision_delta": "Key is derived at runtime; hook the KDF at 0x401300.", "ledger_paths": ["hypotheses.H-001", "symbols.0x401120"]}
+  ],
   "artifacts": {
     "scratch_files": [
       ".re_scratch/sub_401120.c",
@@ -78,5 +86,5 @@ Maintain an authoritative, structured JSON state file (`re_state.json`) in the p
 ## Ledger Synchronization Rules
 1. **Immediate Writeback**: Persist updates to `re_state.json` immediately upon completing an analytical step, recovering a symbol, or refuting/confirming a hypothesis.
 2. **Deterministic Context Reloading**: When resuming an analytical track or delegating to subagents, load context directly from `re_state.json` to guarantee continuity across turns.
-3. **Stage Handoff**: A stage change records a one-line `decision_delta` (what changed the next action) and the ledger paths that still apply. Do not restate unchanged triage, scope, or hypotheses.
-4. **Finding Status**: Hypothesis `status` is `open`, `confirmed`, or `refuted`. Finding `status` is defined only in [Rule 11](11-evidence-sufficiency.md). A confirmed hypothesis is not automatically a validated finding. `egress` is `offline`, `lab_only`, or `authorized_target_only`, and it is set before any command that can emit a packet.
+3. **Stage Handoff**: A stage change appends to `handoffs` a one-line `decision_delta` (what changed the next action) and the ledger paths that still apply. Do not restate unchanged triage, scope, or hypotheses.
+4. **Finding Status**: Hypothesis `status` is `open`, `confirmed`, or `refuted`. Finding `status` is defined only in [Rule 11](11-evidence-sufficiency.md). A confirmed hypothesis is not automatically a validated finding. `egress` is `offline`, `lab_only`, or `authorized_target_only`, and it is set before any command that can emit a packet. Each entry in `questions` is `open`, `answered`, `partial`, or `unresolved`; the closeout in Rule 11 sets the final value.
