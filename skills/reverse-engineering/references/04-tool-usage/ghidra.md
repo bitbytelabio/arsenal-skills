@@ -1,8 +1,8 @@
-# Ghidra Headless, PyGhidra, Ghidra MCP Bridges, and REA
+# Ghidra Headless, PyGhidra, and Ghidra MCP Bridges
 
-- **Domain**: Ghidra 12.x batch analysis (`analyzeHeadless`), CPython scripting through PyGhidra, MCP bridges (ReVa, GhidraMCP), and the REA CLI (`rea-agents`) that drives Ghidra, Hopper, or IDA with evidence records.
-- **Scope**: headless pipelines that export decompilation to files, PyGhidra library and script APIs, types and renames, processor and loader selection, BSim and Version Tracking awareness, REA commands, pitfalls.
-- **Verified**: `analyzeHeadless` and PyGhidra snippets ran on Ghidra 12.2 (Homebrew, macOS arm64, JDK 25) with PyGhidra 3.2.0. REA commands were checked against `rea --help` of `rea-agents@6.8.0`. ReVa and GhidraMCP details come from their upstream READMEs and were not run.
+- **Domain**: Ghidra 12.x batch analysis (`analyzeHeadless`), CPython scripting through PyGhidra, and MCP bridges (ReVa, GhidraMCP). REA is in [rea.md](rea.md).
+- **Scope**: headless pipelines that export decompilation to files, PyGhidra library and script APIs, types and renames, processor and loader selection, BSim and Version Tracking awareness, pitfalls.
+- **Verified**: `analyzeHeadless` and PyGhidra snippets ran on Ghidra 12.2 (Homebrew, macOS arm64, JDK 25) with PyGhidra 3.2.0. ReVa and GhidraMCP details come from their upstream READMEs and were not run.
 
 ---
 
@@ -14,7 +14,7 @@
 | Same, with Python scripts | PyGhidra headless (`pyghidraRun -H` or `python -m pyghidra.ghidra_launch ... AnalyzeHeadless`) |
 | Python program owns the loop | PyGhidra library: `pyghidra.start()`, `open_project`, `program_loader`, `program_context` |
 | Agent asks questions interactively | ReVa or GhidraMCP over MCP (section 6) |
-| Evidence-tracked answers across many formats | REA CLI/MCP (section 7) |
+| Evidence-tracked answers across many formats | REA ([rea.md](rea.md)) |
 | Processor IDA lacks or a second opinion on decompilation | Ghidra (any route above) |
 
 Ghidra is the second decompiler next to IDA ([ida-pro.md](ida-pro.md)). Use it for architectures IDA does not license here (many embedded CPUs, SLEIGH-defined processors), for BSim similarity search, and to cross-check Hex-Rays output.
@@ -278,54 +278,9 @@ Tool names differ per release. List them from the client after connecting. Do no
 
 ---
 
-## 7. REA (`rea-agents`)
+## 7. REA
 
-REA (`morluto/rea`, npm `rea-agents`) is one CLI and MCP server over many analysis providers. Native deep analysis uses an existing Ghidra, Hopper, IDA, or Kuna install (provider ids `ghidra`, `hopper`, `ida`, `kuna`). `rea-agents@6.8.0` accepts only the Ghidra 12.1.x line (verified with 12.1.4). It rejects Homebrew's Ghidra 12.2 with `provider_unavailable` / `unsupported_version`. Keep a 12.1.x install for REA, or let REA use IDA (it auto-selected the `ida` provider on this host). Many inspectors (Go, Rust, PE imports, ELF notes, IL2CPP metadata, .NET, JS/Electron) are built in and need no decompiler. Requires Node.js 22.23.4+, 24.22.1+, or 26.12.1+.
-
-```bash
-npm install --global rea-agents          # or: npx -y rea-agents@6.8.0 <command>
-rea doctor --json                        # readiness, providers found
-rea providers --format json              # capability table per provider
-export GHIDRA_INSTALL_DIR="$(brew --prefix ghidra)/libexec"   # else REA searches PATH for ghidraRun
-export REA_ANALYSIS_PROVIDER=ghidra      # or --provider ghidra per command
-rea setup --client claude_code --dry-run     # preview agent registration
-```
-
-Global options on every command: `--format toon|json|yaml|md|jsonl`, `--filter-output <keys>`, `--token-limit <n>`, `--token-offset <n>`, `--schema` (JSON Schema of the command), `--full-output`.
-
-| Command | Synopsis | Purpose |
-|---|---|---|
-| `analyze` | `rea analyze <path> [--provider ghidra] [--snapshot s]` | App overview |
-| `decompile` | `rea decompile <path> [address\|name] [--procedure x] [--file-offset 0x..]` | One function as pseudocode |
-| `decompile-all` | `rea decompile-all <path> --output <dir> [--resume] [--name s] [--limit n]` | Every function to files plus manifest |
-| `function` | `rea function <path> <address\|name> [--detail summary --evidence_output f]` | Function dossier with evidence |
-| `search` | `rea search <path> <pattern> [--kind strings\|procedures] [--mode literal\|regex]` | Strings or procedure names |
-| `xrefs` | `rea xrefs <path> <address\|name>` | References to an address |
-| `trace` | `rea trace <path> <literal>` | Follow a literal feature through references |
-| `inspect-go-binary` / `inspect-rust-binary` | `<path>` | Go build info and modules; cargo-auditable crates |
-| `inspect-pe-imports` / `inspect-pe-resources` / `inspect-pe-load-config` | `<path>` | PE tables, resources, TLS callbacks |
-| `inspect-elf-notes` / `inspect-binary-layout` | `<path>` | ELF notes; layout (needs pwntools on Linux x64) |
-| `inspect-il2cpp-metadata` | `<global-metadata.dat> [--binary libil2cpp.so] [--ghidra-seeds f]` | IL2CPP names and method addresses; seeds Ghidra |
-| `inspect-dart-aot` | `<libapp.so>` | Dart AOT snapshot sections and string pool |
-| `inspect-android-package` | `<apk>` | Manifest and declarations |
-| `inspect-wasm-artifact` | `<wasm>` | Needs WABT 1.0.42 |
-| `analyze-javascript-application` | `<asar\|dir> [--detail summary --evidence_output f]` | Static JS/Electron reconstruction |
-| `recover-javascript-sources` | `<abs .js> <abs absent outdir>` | Readable modules with provenance |
-| `export-web-scripts` | `<capture.json> <abs absent outdir>` | Scripts from a saved page capture |
-| `evidence-export` | `<bundle.json> <out.json> [--overwrite]` | Canonical evidence export |
-| `inspect-analysis-view` | `<workflow.json> [--evidence-bundle f]` | Query a saved evidence bundle without reopening the target |
-| `build-reconstruction-obligation-ledger` | `<workflow.json>` | Ledger of claims vs evidence |
-
-Example: stripped Go service.
-
-```bash
-rea inspect-go-binary /abs/svc --format json > go.json          # compiler, modules, build settings
-rea search /abs/svc "main\." --kind procedures --mode regex --provider ghidra --format json
-rea decompile /abs/svc main.handlePayload --provider ghidra > handlePayload.c
-rea xrefs /abs/svc main.aesKey --provider ghidra --format json
-```
-
-Raise `REA_GHIDRA_STARTUP_TIMEOUT_MS` and `REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS` for large binaries. Use `--snapshot <file>` to keep the Ghidra analysis between calls instead of re-importing. Run `rea <command> --help` before using a command not listed here; flags change between releases.
+REA (`rea-agents`) can drive Ghidra as its native provider and adds many target-free inspectors with Evidence records. It has its own guide: [rea.md](rea.md). REA 6.8.0 accepts only Ghidra 12.1.x, so it cannot use the Homebrew 12.2 install described above.
 
 ---
 
@@ -347,4 +302,3 @@ Raise `REA_GHIDRA_STARTUP_TIMEOUT_MS` and `REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS`
 - `grep -E "Import succeeded|Analysis succeeded|SCRIPT ERROR" analysis.log` shows success and no script errors.
 - Export directory has one `.c` per non-thunk function.
 - Reopen with `-process <name> -noanalysis -readOnly` and confirm renamed symbols and applied types are present.
-- For REA: `rea doctor --json` lists the provider you asked for as available before you trust a `capability_unavailable` result.

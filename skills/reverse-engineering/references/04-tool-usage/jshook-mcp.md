@@ -3,7 +3,7 @@
 - **Domain**: Client-side JavaScript reversing through an MCP server: Chromium/Camoufox automation over CDP, script collection and search, network and WebSocket capture, runtime hooks, breakpoints, anti-debug bypass, AST deobfuscation (webcrack, string arrays, control-flow flattening, JSVMP), source maps, WASM, and V8 heap inspection.
 - **Package**: `@jshookmcp/jshook` 0.4.3 (npm), repo `vmoranv/jshookmcp`, AGPL-3.0. 735 tools in 36 domains per the package's registry snapshot.
 - **Verified**: package metadata with `npm view`; tool names, descriptions, and input schemas by starting the server locally (stdio) and calling `tools/list` under the `search`, `workflow`, and `full` profiles. Tool behavior against live pages was not exercised. Names change between releases: confirm with `search_tools` / `describe_tool` before calling.
-- **Related**: static bundle work without a browser is in [../01-static-architectures/browser-js-wasm.md](../01-static-architectures/browser-js-wasm.md) and [../01-static-architectures/browser-extensions.md](../01-static-architectures/browser-extensions.md). Node/Electron static reconstruction is also available through REA ([rea-ghidra.md](rea-ghidra.md) section 7).
+- **Related**: static bundle work without a browser is in [../01-static-architectures/browser-js-wasm.md](../01-static-architectures/browser-js-wasm.md) and [../01-static-architectures/browser-extensions.md](../01-static-architectures/browser-extensions.md). Node/Electron static reconstruction is also available through REA ([ghidra.md](ghidra.md) section 7).
 
 ---
 

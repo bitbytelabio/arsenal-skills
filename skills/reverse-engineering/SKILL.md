@@ -149,7 +149,8 @@ This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and ma
 |---|---|---|
 | IDA Pro 9.x through official Hex-Rays `ida-mcp` | `open_database` + `execute_python` (IDAPython / `ida-domain`), save and close, dbgsrv | [04-tool-usage/ida-pro.md](references/04-tool-usage/ida-pro.md) |
 | Driving IDA's remote debugger from an agent through official `ida-mcp` | Bounded `ida/re_dbg.py` helper loaded with `execute_python`: start/attach, step, trace breakpoints, live memory | [04-tool-usage/ida-mcp-remote-debugging.md](references/04-tool-usage/ida-mcp-remote-debugging.md) |
-| REA Ghidra Server & Headless Analyzers | Reverse Engineering Assistant (REA), Ghidra headless scripts, decompilation caching | [04-tool-usage/rea-ghidra.md](references/04-tool-usage/rea-ghidra.md) |
+| Ghidra 12.x headless and PyGhidra | `analyzeHeadless` export pipelines, PyGhidra library and scripts, ReVa / GhidraMCP bridges, BSim | [04-tool-usage/ghidra.md](references/04-tool-usage/ghidra.md) |
+| REA (`rea-agents`) over MCP or CLI | Target-free inspectors (Go, Rust, PE, ELF, IL2CPP, Dart, APK, captures), JS/Electron application graphs, Evidence IDs and summary-first paging, Ghidra-backed native sessions | [04-tool-usage/rea.md](references/04-tool-usage/rea.md) |
 | Frida Dynamic Instrumentation Runtime | JavaScript/TypeScript instrumentation, Stalker, memory scanning, Java/ObjC bridges | [04-tool-usage/frida.md](references/04-tool-usage/frida.md) |
 | IPSW Apple Firmware Tooling | iOS/macOS kernel cache extraction, DFU images, dyld shared cache extraction, symbols | [04-tool-usage/ipsw.md](references/04-tool-usage/ipsw.md) |
 | UTM Hypervisor & Virtualization Orchestration | QEMU/Apple Virtualization framework, ARM64/x86_64 guest VMs, headless guest automation | [04-tool-usage/utm-hypervisor.md](references/04-tool-usage/utm-hypervisor.md) |

@@ -38,7 +38,8 @@ The reference repository follows a strict stage-gate hierarchy:
 4. `references/04-tool-usage/`: Load the one guide for the tool you are about to drive, after the architecture reference has named that tool:
    - IDA through official `ida-mcp`: `references/04-tool-usage/ida-pro.md`
    - IDA remote debugging through `ida-mcp` and `ida/re_dbg.py`: `references/04-tool-usage/ida-mcp-remote-debugging.md`
-   - Ghidra headless, PyGhidra, REA: `references/04-tool-usage/rea-ghidra.md`
+   - Ghidra headless, PyGhidra, ReVa/GhidraMCP: `references/04-tool-usage/ghidra.md`
+   - REA MCP/CLI inspectors and Evidence workflow: `references/04-tool-usage/rea.md`
    - Frida CLI, Python API, frida-compile, Gadget: `references/04-tool-usage/frida.md`
    - Apple firmware, kernelcache, dyld cache: `references/04-tool-usage/ipsw.md`
    - UTM VM lifecycle: `references/04-tool-usage/utm-hypervisor.md`

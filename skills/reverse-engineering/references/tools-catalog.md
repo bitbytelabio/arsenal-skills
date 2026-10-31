@@ -8,9 +8,9 @@
 
 | Artifact / Research Objective | Primary Tool | Secondary / Fallback | Reference & Implementation Route |
 |---|---|---|---|
-| **Headless Native Decompilation (PE/ELF/Mach-O)** | IDA Pro through the official Hex-Rays `ida-mcp` | Ghidra via REA (`rea-agents`), Binary Ninja | [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md) |
-| **Multi-Architecture Headless RE** | Ghidra via REA CLI/MCP (`rea-agents@6.8.0`) | IDA Pro, radare2 | [04-tool-usage/rea-ghidra.md](04-tool-usage/rea-ghidra.md) |
-| **Dynamic Binary Instrumentation (DBI)** | Frida (`frida-tools` CLI / REA Frida) | `frida-trace`, QEMU trace | [04-tool-usage/frida.md](04-tool-usage/frida.md) & [02-dynamic-instrumentation/frida-hooking.md](02-dynamic-instrumentation/frida-hooking.md) |
+| **Headless Native Decompilation (PE/ELF/Mach-O)** | IDA Pro through the official Hex-Rays `ida-mcp` | Ghidra `analyzeHeadless` / PyGhidra, Binary Ninja | [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md) |
+| **Multi-Architecture Headless RE** | Ghidra `analyzeHeadless` / PyGhidra | REA with `--provider ghidra` (needs Ghidra 12.1.x), radare2 | [04-tool-usage/ghidra.md](04-tool-usage/ghidra.md), [04-tool-usage/rea.md](04-tool-usage/rea.md) |
+| **Dynamic Binary Instrumentation (DBI)** | Frida (`frida-tools` CLI and Python API) | `frida-trace`, QEMU trace | [04-tool-usage/frida.md](04-tool-usage/frida.md) & [02-dynamic-instrumentation/frida-hooking.md](02-dynamic-instrumentation/frida-hooking.md) |
 | **Apple Firmware & iOS Binaries** | `blacktop/ipsw` & `vphone-cli` Research VM | IDA Pro, `class-dump` | [04-tool-usage/ipsw.md](04-tool-usage/ipsw.md) & [01-static-architectures/mobile-ios.md](01-static-architectures/mobile-ios.md) |
 | **VM Sandboxing & Snapshots** | UTM / QEMU via `utmctl` & `setup_utm.py` | Virtualization.framework, Docker | [04-tool-usage/utm-hypervisor.md](04-tool-usage/utm-hypervisor.md) |
 | **Instruction-Level Debugging** | GDB (pwndbg/gef), LLDB, WinDbg | x64dbg (Windows GUI) | [02-dynamic-instrumentation/debugger-workflows.md](02-dynamic-instrumentation/debugger-workflows.md) |
@@ -46,11 +46,11 @@ Autonomous agents operate under strict constraints regarding user interaction, s
 ### Headless Execution (Autonomous Agent Primary Mode)
 - **Hex-Rays IDA Pro 9.x**:
   - Run only through the official Hex-Rays MCP server (`ida-mcp` via stdio or streamable HTTP): `open_database`, then IDAPython or `ida-domain` code in `execute_python`.
-  - Automate batch tasks using IDAPython in headless mode: `ida -A -S"script.py" target.bin`.
+  - Automate batch tasks with the text-mode binary: `idat -A -S"script.py" -L log.txt target.bin` (the script ends with `ida_pro.qexit(0)`).
   - See detailed workflows in [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md).
 - **Ghidra**:
-  - Execute via REA (`rea-agents`) headless CLI commands (`rea analyze`, `rea decompile`) or Ghidra `analyzeHeadless`.
-  - See detailed workflows in [04-tool-usage/rea-ghidra.md](04-tool-usage/rea-ghidra.md).
+  - Execute with `analyzeHeadless` or PyGhidra. REA can also drive Ghidra 12.1.x as its provider ([04-tool-usage/rea.md](04-tool-usage/rea.md)).
+  - See detailed workflows in [04-tool-usage/ghidra.md](04-tool-usage/ghidra.md).
 - **Network & Dynamic Proxies**:
   - Run `mitmdump` headlessly with Python script addons instead of the curses-based `mitmproxy` GUI.
   - Run `tshark` with `-T fields` or `--export-objects` instead of opening the Wireshark GUI.
@@ -82,14 +82,14 @@ Autonomous agents operate under strict constraints regarding user interaction, s
   - Stdio: `ida-mcp stdio --agent=re-agent --idle-timeout=900 --database /path/to/binary_or_idb`
   - Streamable HTTP: `ida-mcp http --host 127.0.0.1 --port 8737 --database /path/to/target.i64`
 
-### 2. REA Ghidra Multi-Architecture Suite (`rea-agents`)
-- **Capabilities**: Automated headless decompilation, specialized binary layout inspection (`inspect-go-binary`, `inspect-rust-binary`, `inspect-il2cpp-metadata`), and JavaScript/Electron source recovery.
-- **Primary Tool Reference**: [04-tool-usage/rea-ghidra.md](04-tool-usage/rea-ghidra.md)
-- **CLI Invocations**:
+### 2. REA (`rea-agents`, "Reverse Engineer Anything")
+- **Capabilities**: 229 MCP tools in 6.8.0. Target-free inspectors (Go build info, cargo-auditable crates, PE/ELF tables, IL2CPP metadata, Dart AOT, APK signatures, HAR/pcap captures) need no decompiler. Native sessions use a provider; this skill pins `ghidra` (12.1.x only) and does not use REA's `ida` provider.
+- **Primary Tool Reference**: [04-tool-usage/rea.md](04-tool-usage/rea.md)
+- **CLI Invocations** (`--format json`; there is no `--json` flag):
   ```bash
-  rea analyze "$BIN" --provider ghidra
-  rea decompile-all "$BIN" --output "$OUT" --resume
-  rea inspect-go-binary "$BIN" --format json
+  npx -y rea-agents@6.8.0 inspect-go-binary "$BIN" --format json
+  npx -y rea-agents@6.8.0 analyze-javascript-application "$ASAR" --detail summary --evidence_output "$WORK/js_ev.json"
+  npx -y rea-agents@6.8.0 decompile-all "$BIN" --output "$OUT" --resume --provider ghidra
   ```
 
 ### 3. Frida Dynamic Binary Instrumentation Framework
