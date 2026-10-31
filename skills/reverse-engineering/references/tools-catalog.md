@@ -19,8 +19,8 @@
 | **Physical Memory Acquisition & Forensics** | Microsoft AVML (Linux), Velocidex WinPmem (Windows) | `dump_memory.py`, LiME, LiMEide | [02-dynamic-instrumentation/unpacking-memory-dump.md](02-dynamic-instrumentation/unpacking-memory-dump.md) & [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) |
 | **Network Traffic Proxy & Interception** | `mitmproxy` / `mitmdump`, `setup_proxy_ca.py` | `tshark`, `dumpcap`, Wireshark display filters via `tshark -Y` | [02-dynamic-instrumentation/network-traffic-proxy.md](02-dynamic-instrumentation/network-traffic-proxy.md) |
 | **Vulnerability & Patch Diffing** | BinDiff | Ghidra BSim, Diaphora, radiff2 | [03-objectives/vuln-research-patch.md](03-objectives/vuln-research-patch.md) |
-| **Protocol & Serialization Recovery** | `pbtk`, `protoc --decode_raw`, `tshark` | Wireshark Lua, blackboxprotobuf | [03-objectives/protocol-recovery.md](03-objectives/protocol-recovery.md) |
-| **Cryptographic Algorithm Recovery** | `findcrypt-yara`, Python `cryptography` | Ghidra FindCrypt, CyberChef | [03-objectives/algorithm-recovery.md](03-objectives/algorithm-recovery.md) |
+| **Protocol & Serialization Recovery** | `protoc --decode_raw`, `blackboxprotobuf`, `tshark` | `protodump`, `pbtk`, Kaitai Struct, Scapy, `grpcurl` | [03-objectives/protocol-recovery.md](03-objectives/protocol-recovery.md) |
+| **Cryptographic Algorithm Recovery** | `yr`/`yara` with FindCrypt rules, `capa` | `signsrch`, Ghidra FindCrypt, Python `pycryptodome`, CyberChef | [03-objectives/algorithm-recovery.md](03-objectives/algorithm-recovery.md) |
 | **Static Artifact Contract Validation** | `elf_triage.py`, `check_deliverables.py` | Headless IDA Pro / Ghidra | [03-objectives/static-artifact-contract.md](03-objectives/static-artifact-contract.md) |
 | **C++ ABI / Vtables / Name Mangling** | IDA Pro / Ghidra C++ plugin | `c++filt`, demangler scripts | [01-static-architectures/native-cpp-abi.md](01-static-architectures/native-cpp-abi.md) |
 | **Go Native Binaries** | `rea inspect-go-binary`, IDAGolangHelper | `redress` | [01-static-architectures/native-golang.md](01-static-architectures/native-golang.md) |
@@ -28,12 +28,12 @@
 | **Managed .NET / CIL Assemblies** | `ilspycmd`, `dnSpy` | `de4dot`, Ghidra | [01-static-architectures/managed-dotnet-jvm.md](01-static-architectures/managed-dotnet-jvm.md) |
 | **Java / Android DEX / APK** | `jadx --deobf`, `apktool` | Smali, `androguard` | [01-static-architectures/android-apk.md](01-static-architectures/android-apk.md) |
 | **Unity IL2CPP Bundles** | il2cpp-dumper-rs and Il2CppInspectorRedux via `scripts/il2cpp_tools.py dump` | frida-il2cpp-bridge (`bridge-dump`), Zygisk-Il2CppDumper (`zygisk-build`), `rea inspect-il2cpp-metadata` | [01-static-architectures/unity-il2cpp.md](01-static-architectures/unity-il2cpp.md) |
-| **JavaScript / Electron / WebAssembly** | `jshookmcp` (`@jshookmcp/jshook`), `rea analyze-javascript-application`, `wasm2wat` | `asar`, `webcrack` | [04-tool-usage/jshook-mcp.md](04-tool-usage/jshook-mcp.md) & [01-static-architectures/browser-js-wasm.md](01-static-architectures/browser-js-wasm.md) |
-| **Embedded Firmware / IoT** | `binwalk`, `unblob`, `ripcord` | QEMU user/system, OpenOCD | [01-static-architectures/firmware-iot.md](01-static-architectures/firmware-iot.md) |
+| **JavaScript / Electron / WebAssembly** | `jshookmcp` (`@jshookmcp/jshook`), `rea analyze-javascript-application`, `wasm2wat` | `npx @electron/asar extract`, `webcrack` | [04-tool-usage/jshook-mcp.md](04-tool-usage/jshook-mcp.md) & [01-static-architectures/browser-js-wasm.md](01-static-architectures/browser-js-wasm.md) |
+| **Embedded Firmware / IoT** | `binwalk` (v3, `-e` extract, `-E` entropy), `unblob` | `ubi_reader`, `jefferson`, `sasquatch`, QEMU user/system, OpenOCD | [01-static-architectures/firmware-iot.md](01-static-architectures/firmware-iot.md) |
 | **Malware Sandboxing & Isolation** | Docker (`--cap-drop=ALL`), UTM/QEMU (`utmctl`) | INetSim, mitmproxy sinkhole | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) |
 | **OLLVM Deobfuscation & Anti-Analysis** | `d810-ng`, `obpo-plugin`, Z3 SMT | `ollvm-unflattener`, `ollvm-breaker` | [01-static-architectures/deobfuscation-anti-analysis.md](01-static-architectures/deobfuscation-anti-analysis.md) |
 | **C / C++ Native Deobfuscation & Devirtualization** | `d810-ng`, `angr` deflat, Z3 MBA simplifier | `VTIL`, `NoVmp`, Triton | [01-static-architectures/deobfuscation-anti-analysis.md](01-static-architectures/deobfuscation-anti-analysis.md) |
-| **JavaScript & Web Bundle Deobfuscation** | `jshookmcp` (AST transforms & JSVMP devirtualization), `webcrack`, Babel AST | JSVMP CDP tracer, `wakaru`, `synchrony` | [04-tool-usage/jshook-mcp.md](04-tool-usage/jshook-mcp.md), [01-static-architectures/browser-js-wasm.md](01-static-architectures/browser-js-wasm.md) & [01-static-architectures/browser-extensions.md](01-static-architectures/browser-extensions.md) |
+| **JavaScript & Web Bundle Deobfuscation** | `jshookmcp` (AST transforms & JSVMP devirtualization), `webcrack`, Babel AST | JSVMP CDP tracer, `wakaru` (Rust CLI); `synchrony`/`deobfuscator` only as a last resort, it breaks current javascript-obfuscator output | [04-tool-usage/jshook-mcp.md](04-tool-usage/jshook-mcp.md), [01-static-architectures/browser-js-wasm.md](01-static-architectures/browser-js-wasm.md) & [01-static-architectures/browser-extensions.md](01-static-architectures/browser-extensions.md) |
 | **Java / Android Bytecode Deobfuscation** | `jadx` deobf, `simplify` | `dex-oracle`, Frida string dumping, Smali | [01-static-architectures/android-apk.md](01-static-architectures/android-apk.md) |
 | **C# / .NET Deobfuscation & Devirtualization** | `de4dot`, `de4dot-cex` | `dnlib` automated cleaning, KoiVM devirtualizer, `AsmResolver` | [01-static-architectures/managed-dotnet-jvm.md](01-static-architectures/managed-dotnet-jvm.md) |
 | **Non-PE / Script Artifact Deobfuscation** | `oledump.py`, `olevba`, `xlmdeobf`, AST tools | `scrdec`, PowerShell Parser | [01-static-architectures/script-nonpe-analysis.md](01-static-architectures/script-nonpe-analysis.md) |
@@ -87,9 +87,9 @@ Autonomous agents operate under strict constraints regarding user interaction, s
 - **Primary Tool Reference**: [04-tool-usage/rea-ghidra.md](04-tool-usage/rea-ghidra.md)
 - **CLI Invocations**:
   ```bash
-  rea analyze <binary> --output <dir>
-  rea inspect-go-binary <binary> --json
-  rea analyze-javascript-application <app.asar> --json
+  rea analyze "$BIN" --provider ghidra
+  rea decompile-all "$BIN" --output "$OUT" --resume
+  rea inspect-go-binary "$BIN" --format json
   ```
 
 ### 3. Frida Dynamic Binary Instrumentation Framework
@@ -140,19 +140,17 @@ Autonomous agents operate under strict constraints regarding user interaction, s
 ### 8. JSHook MCP (`@jshookmcp/jshook`)
 - **Capabilities**: Over 600 specialized reverse engineering tools organized across 34 capability domains; lightweight search-first profile (`MCP_TOOL_PROFILE=search`, ~3k tokens) with discovery meta-tools (`search_tools`, `describe_tool`, `call_tool`, `coverage_report`); CDP browser automation and session management; dynamic function/method hooking and parameter/return value tampering; JSVMP (JavaScript Virtual Machine Protection) bytecode recording and devirtualization; AST deobfuscation pipelines (`JScramblerDeobfuscator`, `VMDeobfuscator`, `PackerDeobfuscator`); V8 TurboFan graph generation, deoptimization tracing, and allocation tracking; WebAssembly GC inspection, disassembly, and memory forensics (`HardwareBreakpoint`, `MemoryScanner`, `PointerChainEngine`); BoringSSL interceptor and WebSocket frame capture.
 - **Primary Tool Reference**: [04-tool-usage/jshook-mcp.md](04-tool-usage/jshook-mcp.md) & [01-static-architectures/browser-js-wasm.md](01-static-architectures/browser-js-wasm.md)
-- **MCP & Tool Invocations**:
-  ```json
-  // 1. Search available tools by keyword/intent in search profile
-  search_tools({"query": "xhr breakpoint"})
+- **MCP & Tool Invocations** (these are MCP tool calls, not JSON documents; the argument object of each call is JSON):
+  ```text
+  # 1. Search available tools by keyword/intent in search profile
+  search_tools      arguments: {"query": "xhr breakpoint"}
 
-  // 2. Inspect exact parameter schema before calling
-  describe_tool({"tool_name": "break_on_xhr"})
+  # 2. Inspect exact parameter schema before calling
+  describe_tool     arguments: {"tool_name": "break_on_xhr"}
 
-  // 3. Dynamic execution via meta-tool
-  call_tool({
-    "tool_name": "break_on_xhr",
-    "arguments": { "url_pattern": "/api/v1/auth" }
-  })
+  # 3. Dynamic execution via meta-tool
+  call_tool         arguments: {"tool_name": "break_on_xhr",
+                                 "arguments": {"url_pattern": "/api/v1/auth"}}
   ```
   ```bash
   # Standalone HTTP daemon execution mode (optional for multi-client sharing)
@@ -207,15 +205,51 @@ Autonomous agents operate under strict constraints regarding user interaction, s
   ```
 ---
 
+## Install Commands By Platform
+
+Verify a tool is absent before installing (`command -v <tool>`). On this macOS host, `r2`/`rabin2`/`radiff2`/`rafind2`, `tshark`, `protoc`, `buf`, `mitmdump`, `frida`, `node`, `go`, `cargo`, `uv`, `yr` (yara-x) are already present. Prefer `uv tool install` / `uv run --with` for Python tools so nothing lands in the system interpreter.
+
+| Tool | macOS (brew) | Linux (apt) | Python / other |
+|---|---|---|---|
+| radare2 suite | `brew install radare2` | `apt install radare2` | — |
+| Wireshark CLI | `brew install wireshark` | `apt install tshark` | — |
+| protobuf (`protoc`) | `brew install protobuf` | `apt install protobuf-compiler` | — |
+| `buf` / `grpcurl` | `brew install bufbuild/buf/buf grpcurl` | download release | — |
+| blackboxprotobuf | — | — | `uv run --with blackboxprotobuf python ...` |
+| protodump | — | — | `go install github.com/arkadiyt/protodump/cmd/protodump@latest` |
+| pbtk | — | — | `uv tool install pbtk` (needs `jad`, `dex2jar` for Java/JS) |
+| Kaitai compiler (`ksc`) | `brew install kaitai-struct-compiler` | `apt install kaitai-struct-compiler` | runtime: `uv run --with kaitaistruct python ...` |
+| Scapy | — | — | `uv run --with scapy python ...` |
+| capa | — | — | `uv tool install flare-capa` → `capa` |
+| FLOSS | — | — | `uv tool install flare-floss` → `floss` |
+| yara-x (`yr`) | `brew install yara-x` | `cargo install yara-x-cli` | — |
+| binwalk (v3) | `brew install binwalk` | `cargo install binwalk` | — |
+| unblob | — | — | `uv tool install unblob` |
+| mitmproxy | `brew install mitmproxy` | `apt install mitmproxy` | `uv tool install mitmproxy` |
+| frida-tools | — | — | `uv tool install frida-tools` |
+| jadx | `brew install jadx` | download release | — |
+| ghidriff | — | — | `uv tool install ghidriff` (needs `GHIDRA_INSTALL_DIR`) |
+| CyberChef | — | — | `npx cyberchef` or the hosted web app |
+
+`signsrch` builds from source (no package); `findcrypt` for crypto scanning is a YARA ruleset, not a standalone binary (see below). BinDiff + BinExport are installed from the vendor release packages, not a package manager.
+
+## Cryptographic Scanning Tools (Accurate Names)
+
+- **FindCrypt is a ruleset, not a command.** Use the published YARA rules with the installed scanner: `yr scan findcrypt.yar <target>` (yara-x) or `yara findcrypt.yar <target>`. `capa` also flags crypto via its rule set: `capa <target>`. IDA's `findcrypt` and Ghidra's `findcrypt` are in-tool plugins.
+- **`signsrch`** matches thousands of constant/S-box signatures; build from Luigi Auriemma's source.
+- Do not reference a pip package named `findcrypt-yara`; it is a rules repository cloned next to the scanner.
+
+---
+
 ## Sandboxing, Isolation & Remote Debugger Containment Matrix
 
 Untrusted binaries and dynamic payloads **MUST NEVER** execute on bare-metal host workstations. All dynamic analysis must be routed through isolated containers or disposable virtual machines:
 
 | Target Profile | Containment Layer | Network Topology | Debugger Architecture | Reference Route |
 |---|---|---|---|---|
-| **Linux ELF / Dynamic Loader / Stagers** | Hardened Docker Container (`--cap-drop=ALL`, seccomp, `--network none`, ro-mount) | Completely severed (`--network none`) or host-only bridge | `gdbserver 0.0.0.0:23946` / `linux_server64 -p23946` | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) |
+| **Linux ELF / Dynamic Loader / Stagers** | Hardened Docker Container (`--cap-drop=ALL`, seccomp, `--network none`, ro-mount) | Completely severed (`--network none`) or host-only bridge | `gdbserver --once 0.0.0.0:2345 ./target` / `linux_server -p23946` (`armlinux_server` for arm64) | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) |
 | **Windows PE / Crypter / Rootkit** | Disposable UTM VM (`utmctl`) on Apple Silicon / KVM on Linux | Host-only gateway + INetSim / mitmdump sinkhole | `win64_remote.exe -p23946` on guest; Host IDA connects remotely | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) & [04-tool-usage/utm-hypervisor.md](04-tool-usage/utm-hypervisor.md) |
-| **Android APK / Native .so** | QEMU/vPhone / Corellium Virtual Device | Sinkholed proxy (`mitmproxy` CA pinned) | `android_server64 -p23946` via forwarded ADB port | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) & [04-tool-usage/frida.md](04-tool-usage/frida.md) |
+| **Android APK / Native .so** | QEMU/vPhone / Corellium Virtual Device | Sinkholed proxy (`mitmproxy` CA pinned) | `android_server -p23946` (arm64) after `adb forward tcp:23946 tcp:23946` | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) & [04-tool-usage/frida.md](04-tool-usage/frida.md) |
 | **Script / Office Macro (.vbs, .ps1, .docm)** | Isolated Python parser / headless sandbox container | Disconnected / Mock HTTP loopback | Python AST unrolling / `oledump` / `xlmdeobf` | [01-static-architectures/script-nonpe-analysis.md](01-static-architectures/script-nonpe-analysis.md) |
 
 ---

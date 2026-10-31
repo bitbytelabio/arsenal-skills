@@ -5,6 +5,21 @@ Open this file when triage is done and the target matches a shape below, or when
 
 Do not paste a solver until the shape matches. Do not treat a file name, a section name, or a function name as the behavior.
 
+## Detection Commands (Run These To Decide Which Shape)
+
+These are the cheap probes that place a target in a section below. All are read-only.
+
+- Carve embedded files and find the overlay: `binwalk target` (signatures), `binwalk -E target` (entropy map). A ZIP/PK blob inside `.rodata` is section 1, row 1.
+- Find a known table or magic by bytes: `rafind2 -x 637c777b target` (AES S-box), `rafind2 -s 'expand 32-byte' target` (ChaCha), `rafind2 -x 1337babe target` (nanomite marker).
+- Sections, entry, and a lying header: `rabin2 -S target` (sections), `rabin2 -I target` (bin info), `readelf -lh target` (program vs section headers — `e_shoff`/`e_shnum` corruption is section 5).
+- Imports and dynamic resolution tell: `rabin2 -i target`. Only `LoadLibrary`/`GetProcAddress`/`dlopen` plus a hash compare is section 5.
+- Constructors and exit handlers: `rabin2 -i target | grep -i init`, and check `.init_array`/`.fini_array`/`__cxa_atexit` (section 2, "real work is not in main").
+- Signals and anti-debug syscalls: `rabin2 -i target | grep -iE 'ptrace|signal|sigaction|fork|rdtsc'` (section 2).
+- Strings for a VM/DSL, a font, or a format-string bytecode: `rabin2 -z target | grep -iE 'opcode|dispatch|%hhn|GSUB|ligature'`.
+- Width/sign mismatch to re-check against the decompiler: disassemble the exact range and read `movsx`/`movsxd`/`cdqe` yourself (section 6).
+
+When a probe is rejected (a flag the local tool lacks, a `grep` miss), that is an observation to record, not a negative (Rule 3).
+
 ## 1. The Secret Is Already In The File
 
 | You see | It was | Next |

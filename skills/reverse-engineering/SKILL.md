@@ -13,7 +13,7 @@ Use this skill when an analytical claim or task depends on analyzing a compiled 
 
 ## First actions
 
-This skill is text. No extension runs beside it, so these steps are the same in OMP, Grok Build, and any other agent that can read the file.
+This skill is text. No extension runs beside it, so these steps are the same in any agent that can read the file.
 
 The task constraint and the task schema win over every later section, including this file. A static task does not execute, emulate, debug, or contact a host named in the sample.
 
@@ -84,9 +84,9 @@ Every reverse engineering workflow, regardless of target architecture or executi
 
 Run the automated triage scanner on the target artifact. `scripts/` is relative to this skill's directory (the directory of this `SKILL.md`), not the sample workspace. Lab setup scripts are in that same directory.
 ```bash
-uv run scripts/auto_triage.py <target_artifact>
-# or
-uv run scripts/auto_triage.py <target_artifact>
+uv run scripts/auto_triage.py "$ARTIFACT"
+uv run scripts/elf_triage.py "$ARTIFACT"      # ELF: PT_LOAD map, VMA -> file offset
+uv run scripts/elf_symbols.py "$ARTIFACT"     # ELF: entry and symbol spans
 ```
 The triage scanner inspects file magic, sections, and runtime strings to output a normalized JSON classification and recommend the matching domain reference below.
 
@@ -151,7 +151,7 @@ This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and ma
 | Frida Dynamic Instrumentation Runtime | JavaScript/TypeScript instrumentation, Stalker, memory scanning, Java/ObjC bridges | [04-tool-usage/frida.md](references/04-tool-usage/frida.md) |
 | IPSW Apple Firmware Tooling | iOS/macOS kernel cache extraction, DFU images, dyld shared cache extraction, symbols | [04-tool-usage/ipsw.md](references/04-tool-usage/ipsw.md) |
 | UTM Hypervisor & Virtualization Orchestration | QEMU/Apple Virtualization framework, ARM64/x86_64 guest VMs, headless guest automation | [04-tool-usage/utm-hypervisor.md](references/04-tool-usage/utm-hypervisor.md) |
-| JSHook MCP Browser & Dynamic JS Engine | `@jshookmcp/jshook` (600+ tools, 34 domains), CDP debugging, JSVMP devirtualization, V8 TurboFan tracing, AST deobfuscation | [04-tool-usage/jshook-mcp.md](references/04-tool-usage/jshook-mcp.md) |
+| JSHook MCP Browser & Dynamic JS Engine | `@jshookmcp/jshook` 0.4.x (about 735 tools in 36 domains, loaded through `search_tools`/`describe_tool`/`call_tool`), CDP debugging, hooks, network capture, AST deobfuscation | [04-tool-usage/jshook-mcp.md](references/04-tool-usage/jshook-mcp.md) |
 
 ### 5. Host And Lab Setup (`references/05-environment/`)
 
@@ -174,20 +174,21 @@ Open this section only after the first actions, and only when the task permits r
 All execution, dynamic tracing, unpacking, and instrumentation MUST run exclusively inside strictly isolated execution targets:
 
 1. **Isolated Docker Container**:
-   - Run with restricted capabilities: `--cap-drop=ALL` (or minimal needed `--cap-add=SYS_PTRACE` only for debugger).
-   - Enforce security profile: `--security-opt seccomp=unconfined` (only when required by ptracers) or custom profile.
-   - Restrict resources and filesystem: `--memory=2g`, `--read-only` root with explicit disposable tmpfs mounts.
-   - Network isolation: `--network none` or isolated bridge mapped to fake-net sinks.
+   - Baseline: `docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,exec,size=512m --memory 2g --pids-limit 256 -v "$PWD/sample:/sample:ro" <image>`.
+   - A debugger needs `--cap-add=SYS_PTRACE`. Docker's default seccomp profile already allows `ptrace` on kernel 4.8+; use `--security-opt seccomp=unconfined` only when a tool still fails, and record it.
+   - Docker on macOS runs inside a Linux VM, so a container is not a Windows or macOS sandbox. Use a VM for PE and Mach-O samples.
+   - Network isolation: `--network none`, or an `--internal` bridge that only reaches a fake-net sink container.
 2. **Disposable Virtual Machine**:
    - Hypervisor containment: Headless UTM (`utmctl`) on Apple Silicon macOS, KVM/QEMU on Linux, or VMware on Windows.
-   - Remote debugger bridge: Guest runs remote debug servers (`linux_server`, `win64_remote.exe`, `android_server64`, `gdbserver`) listening on forwarded port 23946. Host IDA Pro / GDB / x64dbg connects across the host-only virtual network without untrusted code ever touching the host OS.
+   - Remote debugger bridge: the guest runs the IDA debug server for its platform (`linux_server`, `armlinux_server`, `win64_remote.exe`, `mac_server_arm`, `android_server`; default port 23946) or `gdbserver`/`lldb-server` on a port you choose. The host debugger connects over the host-only network. UTM "Shared Network" has no port forwarding; use "Emulated VLAN" forwarding or the guest IP. Details: [IDA remote debugging](references/05-environment/ida-remote-debugging.md) and [ida-mcp remote debugging](references/04-tool-usage/ida-mcp-remote-debugging.md).
 3. **Network Containment**:
    - Isolated host-only or fake-net sinks (`inetsim`, `mitmproxy`).
    - Non-routable interfaces and DNS sinkholing.
    - ZERO live internet egress for untrusted malware samples.
 4. **Snapshot & Auto-Rollback**:
-   - Create a clean QCOW2 internal snapshot (`utmctl snapshot <vm-id> create` or `qemu-img snapshot -c`) before executing or debugging any sample.
-   - Immediately rollback (`utmctl snapshot <vm-id> restore`) after data capture or on process exit.
+   - Create a clean snapshot before the first run: `uv run scripts/setup_utm.py snapshot-create "$VM" clean` (wraps `utmctl snapshot create "$VM" --name clean`, UTM 5.0.8+).
+   - Roll back after capture or on process exit: `uv run scripts/setup_utm.py snapshot-restore "$VM" clean` (`utmctl snapshot restore "$VM" --snapshot clean`). For a one-off run, `uv run scripts/setup_utm.py start-disposable "$VM"` discards guest writes.
+   - Older UTM without `utmctl snapshot`: stop the VM and use `uv run scripts/setup_utm.py qcow2-snapshot` (qemu-img on qcow2 disks, QEMU backend only).
 5. **Egress Mode**:
    - Record `egress` in `re_state.json` before the first command that can emit a packet: `offline`, `lab_only`, or `authorized_target_only`.
    - Static triage does not resolve recovered domains, and an untrusted sample does not get live internet egress. `offline` and `lab_only` stay inside the containment rules above.
@@ -221,7 +222,7 @@ Filter baseline OS noise (`CreateFile`, `ReadFile`) and prioritize high-risk mal
 - **Network & Persistence Cluster**: `InternetOpen` / `WinHttpOpen` / `URLDownloadToFile` + `RegSetValueEx` / `CreateService`.
 
 ### 5. IAT Repair Iron Rules & Self-Check Crash Bypass
-- **IAT Repair Iron Rule**: When unpacking PE binaries, use ImportREC for 32-bit and Scylla for 64-bit. If the automated repair tool errors, produces a non-functional binary, or encounters encrypted/VM-protected imports:
+- **IAT Repair Iron Rule**: When unpacking PE binaries, rebuild imports with Scylla (x86 and x64; also built into x64dbg) or with `pe-sieve /imp 3` on a live process. ImportREC is a legacy 32-bit fallback. If the automated repair tool errors, produces a non-functional binary, or encounters encrypted/VM-protected imports:
   1. Immediately terminate static IAT reconstruction.
   2. Record `E-iat-repair-fail` with tool error details.
   3. Transition immediately to dynamic memory analysis: set API breakpoints or hardware breakpoints in VM to capture resolved APIs at runtime.
@@ -282,20 +283,19 @@ Lab provisioning lives in [host and lab setup](references/05-environment/host-an
     # Install CA into iOS Simulator / Research VM trust store
     uv run scripts/setup_proxy_ca.py install-ios-sim
     ```
-- **Multi-Framework Mobile SSL/TLS Pinning Bypass**:
-  After ensuring a rooted environment and system CA certificate installation, deploy universal dynamic instrumentation scripts targeting the application's network layer:
-  - **Android (Java / Kotlin / Conscrypt / Cronet)**:
-    - *OkHttp3*: Hook `okhttp3.CertificatePinner.check(java.lang.String, java.util.List)` and `check$okhttp` to return immediately without throwing `SSLPeerUnverifiedException`.
-    - *TrustManager / Conscrypt*: Hook `javax.net.ssl.SSLContext.init` to substitute a custom `X509TrustManager` accepting all certificates; hook `com.android.org.conscrypt.TrustManagerImpl.checkTrustedRecursive`.
-    - *WebView*: Hook `android.webkit.WebViewClient.onReceivedSslError` to invoke `handler.proceed()`.
-    - *Cronet*: Hook native Cronet verification engine calls in `org.chromium.net.impl.CronetUrlRequestContext`.
-  - **iOS (Security.framework / NSURLSession / Alamofire)**:
-    - *Security.framework*: Intercept `SecTrustEvaluateWithError` to set error to `NULL` and return `true` (1); hook `SecTrustEvaluate` to write `kSecTrustResultProceed` into the result pointer and return `errSecSuccess` (0).
-    - *NSURLSession*: Hook `URLSession:didReceiveChallenge:completionHandler:` delegate callback to invoke completion handler with disposition `NSURLSessionAuthChallengeUseCredential` and `[NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust]`.
-    - *Alamofire / AFNetworking*: Hook `ServerTrustEvaluating.evaluate(_:forHost:)` to return success; hook `AFSecurityPolicy.evaluateServerTrust:forDomain:`.
-  - **Flutter (BoringSSL Native Engine)**:
-    - Flutter bypasses system proxy settings and uses static-linked BoringSSL within `libflutter.so` (Android) or `Flutter.framework` (iOS).
-    - Perform memory scanning or pattern matching on `libflutter.so` to locate `ssl_crypto_x509_session_verify_cert_chain` (or the verification function comparing `ssl_verify_result_t`), hook the function via Frida NativePointer, and force return `1` (`kVerifyOk`).
+- **Pinning, only after the CA is trusted and a flow still fails**: Read the failure first. A TLS alert after a CONNECT with the system CA installed points at app-level pinning. The decision table, hook targets, and Flutter workflow are in [network-traffic-proxy.md](references/02-dynamic-instrumentation/network-traffic-proxy.md). `uv run scripts/setup_proxy_ca.py export-frida-scripts` writes the starter Frida scripts.
+
+  | Stack | Where the trust decision is | Hook |
+  |---|---|---|
+  | Android platform TLS | `com.android.org.conscrypt.TrustManagerImpl` | `checkTrustedRecursive` / `verifyChain` return the chain unchanged |
+  | OkHttp 3/4 | `okhttp3.CertificatePinner` | `check(String, List)` and OkHttp 4 `check$okhttp` return early |
+  | WebView | `WebViewClient.onReceivedSslError` | call `handler.proceed()` |
+  | Cronet / Chromium net | native BoringSSL in `libcronet*.so` | native verifier hook, as for Flutter |
+  | iOS Security.framework | `SecTrustEvaluateWithError` | set `*error = NULL`, return `true` |
+  | iOS URLSession delegate | `URLSession:didReceiveChallenge:completionHandler:` | call the handler with `UseCredential` and `credentialForTrust:` |
+  | Flutter (Android/iOS) | static BoringSSL in `libflutter.so` / `Flutter.framework` | force `ssl_crypto_x509_session_verify_cert_chain` to return `1`; Java and ObjC hooks never see Dart sockets, which also ignore the system proxy |
+
+  A hook that forces a return is an experiment. Record which hooks ran and on which host.
 
 
 ## Tool Selection & Capabilities Index

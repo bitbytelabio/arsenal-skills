@@ -1,364 +1,310 @@
-# Dynamic Unpacking, OEP Detection & Memory Dumping
+# Unpacking, OEP Finding, and Memory Dumping
 
-## Title & Overview
-- **Domain**: Packed executables, runtime crypters, dynamic loaders, and self-modifying code (PE, ELF, Mach-O).
-- **Scope**: Detecting runtime packing (UPX, Themida, VMProtect, custom crypters), entropy profiling, Original Entry Point (OEP) identification via tail jump and `pushad`/`popad` patterns, devirtualization of VM-protected dispatchers, memory dumping via `dump_memory.py`, and Import Address Table (IAT) reconstruction with Scylla.
+## When To Open
+Open this file when the bytes on disk are not the code that runs: high-entropy sections, a tiny import table, `UPX0`/`.vmp0`/`.themida` sections, a `PT_LOAD` whose memory size dwarfs its file size, or a stub that allocates memory and jumps into it. The goal is a static artifact you can analyze (a dumped image with usable imports) or, when that fails, runtime evidence of what the unpacked code does. Every step that executes the sample runs in the lab from [malware-sandbox-isolation.md](malware-sandbox-isolation.md). Debugger syntax is in [debugger-workflows.md](debugger-workflows.md). Devirtualization strategy is in [deobfuscation-anti-analysis.md](../01-static-architectures/deobfuscation-anti-analysis.md).
 
----
-
-## Trigger Conditions & Detection Indicators
-When to open this reference:
-- Static analysis reveals packed sections (e.g. `UPX0`, `UPX1`, `.vmp0`, `.themida`, `.packer`, or high Shannon entropy > 7.2 across executable sections).
-- Executable imports are minimal: only `LoadLibraryA` + `GetProcAddress` on Windows, or `dlopen` + `dlsym` on Linux.
-- Binary exhibits structural anomalies: Raw Size ≈ 0 while Virtual Size is large, or section flags marked both Writable and Executable (`RWX`).
-- Control flow jumps into dynamically allocated heap/stack regions or anonymous mapped memory.
-- Execution reaches a complex fetch-decode-dispatch loop executing custom virtual bytecode rather than compiler-generated instructions.
-
----
-
-## Tooling & CLI/MCP Actions
-
-- **Triage & Identification**:
-  - `diec` (Detect It Easy command line) or `rabin2 -S <binary>`.
-  - Entropy profiler: `binwalk -E <binary>`.
-- **Process-Level Memory Dumpers**:
-  - `uv run scripts/dump_memory.py <pid> -o <dump_dir>`.
-  - PE-sieve / HollowsHunter: `pe-sieve /pid <pid> /dmode 3`.
-  - Windows Sysinternals ProcDump: `procdump.exe -ma <pid> target_process.dmp`.
-- **Physical Memory Acquisition Frameworks**:
-  - Linux: Microsoft AVML (`avml --compress /tmp/mem.lime`).
-  - Windows: Velocidex WinPmem (`winpmem.exe -o mem.raw --mode 1`).
-- **Debugger & Unpacking Engines**:
-  - Windows PE: `x64dbg` with Scylla (built-in IAT recovery) and ScyllaHide (anti-anti-debug).
-  - Linux ELF: GDB (`pwndbg` / `gef`), `gcore <pid>`, `/proc/<pid>/maps` + `/proc/<pid>/mem`.
-  - Deobfuscation & Devirtualization: Triton, Miasm, VTIL, NoVmp.
-- **Volatile Memory Analysis & Forensics**:
-  - Volatility 3 (`vol` / `vol.py`) for Windows and Linux kernel memory triage.
-  - Rekall Forensic Framework.
-
-## Core Methodologies & Step-by-Step Technical Workflow
-
-### 1. Detecting Runtime Packing & Entropy Screening
-
-#### Entropy Profiling
-- **Shannon Entropy Range**:
-  - `0.0 - 5.5`: Plain text, sparse tables, uncompressed code.
-  - `5.5 - 6.8`: Standard compiled native code and CRT runtime.
-  - `7.0 - 8.0`: Compressed archives, encrypted payload buffers, packed stubs.
-- Run CLI triage:
-  ```bash
-  # Check file with Detect It Easy
-  diec target.exe
-  # Check section entropy and characteristics
-  rabin2 -S target.exe
-  # Search for packer strings in raw binary
-  grep -E -a "UPX|Themida|VMProtect|ASPack|MPRESS|Enigma" target.exe
-  ```
-
-#### TLS Callbacks & Early Execution
-Packed executables frequently place anti-debugging and decryption stubs in Thread Local Storage (TLS) callbacks:
-- TLS callbacks execute **before** the PE Entry Point is reached.
-- In `x64dbg`: Configure `Options -> Events` and check **TLS Callbacks** and **System Breakpoint**.
-- In GDB/pwndbg: Set hardware breakpoint on the TLS callback address obtained from the PE header directory (`IMAGE_DIRECTORY_ENTRY_TLS`).
-
-### 2. Original Entry Point (OEP) Detection Methodologies
-
-#### Method A: The Pushad / Popad & Tail Jump Pattern (Standard Crypters / UPX)
-1. At entry point, the packer saves register state:
-   ```assembly
-   pushad          ; Save EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
-   ```
-2. Set a hardware breakpoint on the stack pointer immediately after `pushad`:
-   - In x64dbg: Step over `pushad`, look at `ESP`, right-click in dump -> `Breakpoint -> Hardware, Access -> Dword`.
-3. Run execution (`F9`). When the packer finishes unpacking, it executes:
-   ```assembly
-   popad           ; Restore registers
-   jmp 0x00401500  ; Long tail jump to OEP outside packer stub section
-   ```
-4. Stepping across this long jump lands execution directly at the real compiler CRT entry point (`OEP`).
-
-#### Method B: Memory Protection Page Breakpoints (Write-Then-Execute)
-1. Inspect the memory map of the process in `x64dbg` or GDB.
-2. Locate the main `.text` or executable section of the primary binary module (currently holding encrypted data or zeros).
-3. Set a memory page breakpoint or hardware execute breakpoint on the target `.text` section:
-   - In x64dbg: In Memory Map tab, right-click `.text` -> `Set Memory Breakpoint -> Break on Execute`.
-4. Run execution. The unpacker unpacks and writes data into memory, then eventually transfers execution into the newly written `.text` section.
-5. The memory breakpoint triggers on the first instruction executed in the unpacked section: this instruction is the OEP.
-
-#### Method C: Compiler Runtime Entry Signatures
-Standard compilers produce recognizable initialization sequences at OEP:
-- **MSVC (Visual C++)**:
-  ```assembly
-  call sub_4011A0       ; __security_init_cookie
-  jmp  sub_401200       ; __scrt_common_main_seh
-  ```
-- **GCC / MinGW**:
-  ```assembly
-  push rbp
-  mov  rbp, rsp
-  and  rsp, -16
-  call sub_401080       ; __main
-  ```
-
-### 3. Memory Dumping via `dump_memory.py` and Debugger APIs
-
-Once halted at OEP, dump the unpacked memory pages before the program terminates or clears memory:
+## Is It Packed?
+Static signals, cheapest first. Run these on the host; they only read bytes.
 
 ```bash
-# Using project dump script against running process
-uv run scripts/dump_memory.py <target_pid> -o /tmp/unpacked_dump/
-
-# Command output extracts all writable / executable regions:
-# /tmp/unpacked_dump/mem_00400000_00450000_r-x_target.exe.bin
-# /tmp/unpacked_dump/mem_00450000_00470000_rw-_target.exe.bin
+SAMPLE=./sample.bin
+uv run scripts/auto_triage.py "$SAMPLE"          # whole-file entropy, packer strings, next reference
+diec "$SAMPLE"                                   # Detect It Easy: packer/protector/compiler signatures
+r2 -qc 'iS entropy' "$SAMPLE"                    # per-section entropy column (radare2)
+readelf -lW "$SAMPLE"                            # ELF: compare FileSiz and MemSiz per PT_LOAD
 ```
 
-In GDB:
-```text
-(gdb) info proc mappings
-(gdb) dump binary memory /tmp/unpacked_elf.bin 0x00400000 0x00480000
-```
+| Signal | Reading |
+|---|---|
+| Section entropy > 7.2 on code | Compressed or encrypted |
+| Whole-file entropy | Plain compiled code ≈ 5.5–6.5. UPX-packed ELF measured 7.83 vs 5.92 unpacked |
+| PE: `VirtualSize` ≫ `SizeOfRawData` on the first section | Space reserved for unpacked code (UPX0 has raw size 0) |
+| ELF: no section headers, first `PT_LOAD` `MemSiz` ≫ `FileSiz` | Measured on UPX 4.2 AArch64: `FileSiz 0x1000`, `MemSiz 0x96d80` |
+| Imports limited to `LoadLibraryA`, `GetProcAddress`, `VirtualAlloc`, `VirtualProtect` | Runtime import resolution |
+| Section names `UPX0/UPX1`, `.vmp0/.vmp1`, `.themida`, `.aspack`, `.MPRESS1`, `.petite`, `.enigma1` | Known packer, possibly renamed |
+| Entry point outside the first code section, or in the last section | Stub runs first |
+| TLS callbacks present on a small binary | Early anti-debug or decryption |
 
-In Windows using `pe-sieve`:
-```cmd
-pe-sieve.exe /pid <pid> /dmode 3 /minidump
-```
+A clean signal is not proof of no packing. Renamed sections and low-entropy XOR stubs pass these checks. A tiny import table on a native binary is a dynamic-resolution suspect regardless of entropy.
 
-### 4. Import Address Table (IAT) Reconstruction & The IAT Repair Iron Rules
+## Pick The Approach
 
-Packers destroy the original Import Table, resolving external DLL APIs dynamically via `LoadLibraryA` and `GetProcAddress`. A raw memory dump has unmapped import pointers.
-
-#### The IAT Repair Iron Rules (MANDATORY)
-1. **Tool Selection Constraint**:
-   - **x86 (32-bit PE)**: Use **ImportREC** (or Scylla).
-   - **x64 (64-bit PE)**: Use **Scylla** (or x64dbg built-in Scylla plugin). NEVER attempt to use 32-bit ImportREC on 64-bit PE binaries.
-2. **Fast-Failure Boundary**:
-   - Attempt automated/semi-automated reconstruction (`IAT Autosearch` -> `Get Imports` -> `Fix Dump`).
-   - If the auto-repair tool throws errors, generates corrupt pointers, or the resulting output binary fails to parse:
-     - **STOP STATIC IAT REPAIR IMMEDIATELY**. Do not get trapped in an endless loop modifying static import structures.
-     - Record the failure in Evidence as `E-iat-repair-fail` (capturing tool name, target PID, and failure details).
-     - **TRANSITION TO DYNAMIC API BREAKPOINTS**: Switch directly to dynamic debugging in memory. Set hardware breakpoints on critical functional APIs (`CreateFile`, `InternetOpen`, `RegSetValue`, `VirtualAlloc`) to intercept and resolve dynamic API pointers at runtime. This fulfills the import analysis contract via dynamic evidence.
-3. **Self-Check Crash Bypass (`E-self-check-crash`)**:
-   - If the unpacked and patched binary crashes immediately upon launch (e.g. instant crash, silent exit, or exception):
-     - The binary likely implements runtime self-integrity checks (PE file size verification, PE header CRC32, or hash checks against disk bytes).
-     - **STOP FILE PATCHING IMMEDIATELY**. Continuing to patch disk headers will only continue triggering the integrity check.
-     - Record `E-self-check-crash` in Evidence.
-     - In the dynamic debugger, set hardware execution breakpoints on file-read and integrity-checking APIs: `CreateFileA/W`, `GetFileSize`, `GetFileSizeEx`, `ReadFile`, and hashing routines (MD5/CRC32). Trace where the file is read from disk and patch the comparison branch or force the check return value in memory.
-
-#### Scylla Step-by-Step Workflow
-1. **Attach Scylla**:
-   - In `x64dbg`, open the built-in Scylla plugin (or launch `Scylla.exe` standalone and attach to `<pid>`).
-2. **Configure OEP**:
-   - In the `OEP` field, enter the Virtual Address (or Relative Virtual Address) of the identified OEP.
-3. **IAT Autosearch**:
-   - Click `IAT Autosearch`. Scylla searches memory for arrays of API pointers pointing into loaded DLLs (`kernel32.dll`, `user32.dll`, `ntdll.dll`).
-4. **Get Imports**:
-   - Click `Get Imports`. Scylla maps every pointer to DLL exports and displays the resolved imports tree.
-5. **Handle Unresolved Imports**:
-   - If red entries appear (unresolved pointers), this indicates API redirection (thunks created by the packer to disguise API calls).
-   - Trace the unresolving pointer to determine if it forwards to a standard DLL export. Right-click the item and select `Disassemble / Trace`.
-6. **Dump and Fix**:
-   - Click `Dump` to write the memory image to `dump.exe`.
-   - Click `Fix Dump` and select `dump.exe`. Scylla creates a new section (`.scy`) containing the valid rebuilt Import Directory, IAT, and recalculated section headers.
-   - The resulting `dump_SCY.exe` can now be analyzed in IDA Pro or Ghidra with full cross-references and symbol recognition.
-
-### 5. ExitProcess Memory Dumping Pattern
-When dynamic unpacking is thwarted by anti-debugging countermeasures that force a process exit:
-- Pre-set a fallback breakpoint on `kernel32.ExitProcess` and `ntdll.NtTerminateProcess`.
-- When the breakpoint triggers on process exit:
-  - **DO NOT TERMINATE OR RESTART THE PROCESS**.
-  - The process address space is frozen in its fully decrypted memory state.
-  - Immediately invoke `dump_memory.py`:
-    ```bash
-    uv run scripts/dump_memory.py <pid> -o /tmp/exitprocess_dump/
-    ```
-  - Recover unpacked executable sections and strings directly from the dumped memory snapshot.
-  - Document artifact in Evidence as `E-mem-dump-exitprocess`.
-
-### 6. Devirtualization of VM-Protected Dispatchers (VMProtect / Themida)
-
-When unpacking a virtualized binary, outer packing stubs are removed, but the core routines remain converted into custom bytecode:
-
-```text
-Target Code  --> [ VM Entry Stub ]
-                      | Saves Native Registers (Context Structure)
-                      v
-                 [ VM Dispatcher Loop ] <----------------+
-                      | Fetches Next Virtual Opcode      |
-                      | Decodes Opcode via Table/Math    |
-                      | Computes Handler Address         |
-                      v                                  |
-                 [ Virtual Handler Routine ] ------------+
-                      | Executes Micro-Operation (e.g. VADD, VXOR)
-                      | Updates Virtual Context
-                      v (When done)
-                 [ VM Exit Stub ]
-                      | Restores Native Registers
-                      v
-                 Target Native Continuation
-```
-
-#### Step-by-Step Devirtualization Workflow
-1. **Identify the Dispatcher Loop**:
-   - Look for an indirect jump instruction: `jmp rax` or `jmp [rbx + rsi*8]`.
-   - The dispatcher fetches bytecode bytes, decrypts them with a rolling key (e.g., `xor dl, al; ror dl, 3`), and indexes into a jump table.
-2. **Map Handler Semantics via Symbolic Execution**:
-   - Do not reverse every handler by hand. Isolate individual handler basic blocks and lift them using Triton or Miasm.
-   - Symbolic execution strips out obfuscation noise (MBA expressions, dead stores, junk instructions), yielding the pure mathematical operation (e.g., `rax = rax + rbx`).
-3. **Trace Virtual Instruction Stream**:
-   - Set a breakpoint on the VM dispatcher loop.
-   - Log the virtual instruction pointer and executed handler address on each loop iteration.
-4. **Lift to Intermediate Representation (VTIL)**:
-   - Lift the extracted opcode stream into VTIL (Virtual Translation Intermediate Language).
-   - Execute optimization pipelines: Dead-Code Elimination (DCE), Constant Folding, and Peephole Optimization.
-   - Reconstruct clean native control flow graphs from simplified VTIL blocks.
-
----
-
-### 7. Process-Level Dumping vs. Full Physical Memory Acquisition
-
-Memory acquisition sits on a duality between rapid process-scoped carving and comprehensive host-level physical memory triage. Selecting the proper acquisition tier dictates whether ephemeral forensic indicators survive analysis.
-
-#### Acquisition Strategy Matrix
-
-| Capability / Dimension | Process-Level Memory Dump | System Physical Memory Capture |
+| Situation | First move | Fallback |
 |---|---|---|
-| **Primary Tools** | `dump_memory.py`, PE-sieve, HollowsHunter, ProcDump, `gcore` | Microsoft AVML (Linux), Velocidex WinPmem (Windows) |
-| **Execution Scope** | Single user-mode process address space (`VAD` tree / page tables) | Entire physical RAM (Kernel space, all processes, hardware buffers) |
-| **Primary Objective** | Rapid payload carving, unpacked code recovery, heap string inspection | Rootkits, DKOM, hidden processes, injected DLLs, kernel hooks |
-| **Artifacts Recovered** | Decrypted PE/ELF headers, injected shellcode, config buffers | Unlinked `EPROCESS` blocks, active network sockets, driver objects, SSDT/IDT hooks |
-| **Kernel Hook Detection**| No (blind to kernel-level tampering and rootkit masking) | Yes (direct inspection of kernel paging structures and driver objects) |
-| **Acquisition Overhead**| Milliseconds; minimal disk footprint | Seconds to minutes; output matches physical RAM allocation size |
-| **Trigger Window** | At OEP arrival or before `ExitProcess` / termination | Immediately prior to guest VM shutdown or snapshot rollback |
+| Stock UPX (`upx -t` says OK) | `upx -d -o unpacked "$SAMPLE"` on the host; it does not execute the sample | — |
+| UPX with modified magic or names | Restore `UPX!` magics and `UPX0/UPX1` names in a copy, then `upx -d` | Dynamic dump |
+| Known simple 32-bit PE packer (ASPack, FSG, MEW, MPRESS, PEtite, UPX, Yoda) | `unipacker` (emulation) in an x86-64 Linux container | x64dbg + Scylla |
+| Custom crypter / loader | x64dbg: break on `VirtualAlloc`/`VirtualProtect`, find the transfer, dump with pe-sieve or Scylla | `hollows_hunter` across all processes |
+| Process injection / hollowing | `pe-sieve` / `hollows_hunter` on the target process | Volatility `windows.malfind`, `windows.hollowprocesses` |
+| Themida / VMProtect / Enigma | Dump after OEP for strings and unvirtualized code; treat VM handlers as black boxes | Trace I/O behavior, see deobfuscation reference |
+| Linux ELF packer | Run to the transfer under gdb, or let it run and dump `/proc/PID/mem` | `gcore`, then analyze the core |
+| Android packer / DEX protector | `frida-dexdump` or hook ART's DEX loading | Volatility on an emulator memory image |
+| Shellcode stager | `speakeasy --raw` or `qiling` emulation; dump the next stage from the report | Debugger with a breakpoint on the final `jmp`/`call` into new memory |
 
-#### Triage Decision Workflow
-1. **Use Process-Level Dumping when**:
-   - Target is a user-mode dropper, crypter, or standard ransomware strain.
-   - Objective is extracting the clean unpacked payload binary, dumping decrypted C2 configuration blocks, or recovering encryption keys from heap memory.
-   - Low overhead and fast turnaround inside automated triage pipelines are required.
-2. **Use Full Physical Memory Capture when**:
-   - Target drops or interacts with kernel drivers (`.sys`, `.ko`), rootkits, or bootkits.
-   - Direct Kernel Object Manipulation (DKOM) is suspected (e.g., process unlinked from `ActiveProcessLinks` or hidden from task managers).
-   - Analyzing advanced code injection across arbitrary system processes (AtomBombing, Process Doppelgänging, Process Ghosting).
-   - Extracting volatile system-wide network sockets, active TCP connections, credential artifacts (`lsass.exe`), or bash shell history.
+## UPX And Why `upx -d` Fails
+`upx -d` reads the packer's own metadata (`l_info`, `p_info`, `PackHeader`, all tagged with the `UPX!` magic) to reverse the compression. It is a static operation. It fails when a malware author edits that metadata, which costs them nothing and keeps the stub working.
 
----
+Verified on UPX 4.2.2 with a static AArch64 ELF:
+- `upx -t packed` → `[OK]`. `upx -l` shows ratio and format.
+- Replacing the three `UPX!` occurrences with `XYZ!` made `upx -d` report `Unpacked 0 files`. The packed program still ran.
+- Writing `UPX!` back produced a file that `upx -d` unpacked byte-for-byte equal to the original.
 
-### 8. Microsoft AVML (Acquire Volatile Memory for Linux)
-
-Microsoft AVML is a portable, memory-safe volatile memory acquisition tool for Linux written in Rust.
-
-#### Architecture & Mechanism
-- **Zero Compilation Overhead**: Built as a fully static, standalone Rust binary. Does not require target kernel headers, GCC, or dynamic kernel module compilation (unlike classic LiME kernel module builds).
-- **Kernel Access Sources**:
-  - `/dev/crash`: Red Hat / CentOS memory crash driver.
-  - `/dev/fmem`: Direct physical memory driver when present.
-  - `/proc/kcore`: Fallback mechanism reading ELF core format of kernel memory space. AVML parses the kernel page table mappings to extract raw physical pages.
-- **Compression & Streaming**:
-  - Employs inline multi-threaded LZ4 compression (`--compress`).
-  - Direct streaming to remote storage via Azure Blob SAS URLs (`--url`), bypassing local disk writes on compromised hosts.
-
-#### CLI Invocations
 ```bash
-# Standard acquisition with inline LZ4 compression (LiME format)
-sudo ./avml --compress /tmp/mem.lime
-
-# Uncompressed acquisition to raw memory image
-sudo ./avml /tmp/mem.raw
-
-# Force specific memory source (/proc/kcore)
-sudo ./avml --source /proc/kcore /tmp/mem.raw
-
-# Direct cloud upload without storing full image on target filesystem
-sudo ./avml --compress --url "https://myaccount.blob.core.windows.net/evidence/mem.lime?st=...&sig=..."
+# 1. Inspect: the PackHeader sits in the last 0x24 bytes; l_info follows the stub's program headers.
+python3 -I -c 'import sys; d=open(sys.argv[1],"rb").read(); print("UPX!:", d.count(b"UPX!")); print(d[-0x40:].hex(" "))' "$SAMPLE"
+# 2. Restore a replaced 4-byte tag in a copy, then unpack the copy.
+TAG='XYZ!'                     # the 4 bytes the author put where UPX! belongs
+python3 -I -c 'import sys; d=open(sys.argv[1],"rb").read(); t=sys.argv[3].encode(); print("replaced", d.count(t)); open(sys.argv[2],"wb").write(d.replace(t, b"UPX!"))' "$SAMPLE" restored.bin "$TAG"
+upx -t restored.bin && upx -d -o unpacked.bin restored.bin
 ```
 
-#### Post-Acquisition Volatility 3 Analysis
-Analyze captured Linux memory images (`mem.lime` or `mem.raw`) using Volatility 3:
-```bash
-# Enumerate running processes (including memory maps)
-vol -f /tmp/mem.lime linux.pslist.PsList
+Look for the tag the author used in the last 0x40 bytes (PackHeader) and near the start of the stub (`l_info`). Restore it with the same length. Also restore section names `UPX0`/`UPX1`/`UPX2` on PE. If `upx -d` then fails with a checksum or format error, the author changed more than tags. Switch to dynamic unpacking; do not patch further blindly.
 
-# Detect hidden processes unlinked from kernel lists
-vol -f /tmp/mem.lime linux.psaux.PsAux
+## Windows: Finding The OEP
+Run in the Windows VM with x64dbg. Enable TLS callback and entry breakpoints first (x64dbg `init` sets both), and ScyllaHide if the stub checks for a debugger.
 
-# Detect hidden or injected executable code pages
-vol -f /tmp/mem.lime linux.malfind.Malfind
+### ESP / pushad trick (classic compressors, mostly 32-bit)
+1. At the entry point the stub saves registers: `pushad` (x86) or a run of `push` instructions (x64).
+2. Step over it. Set a hardware access breakpoint on the saved-register slot: `bph esp, r, 4` (x86) or `bph rsp, r, 8` (x64).
+3. `run`. The breakpoint fires at the matching `popad`/`pop` sequence after decompression.
+4. Step to the tail jump (`jmp` to a far address, often into the first section). The jump target is the OEP.
 
-# Recover bash command history from memory
-vol -f /tmp/mem.lime linux.bash.Bash
+This works because the stub restores the original register state just before transferring control. It fails on stubs that never save registers, or that use the stack for decompression.
 
-# Verify system call table integrity against rootkit hooks
-vol -f /tmp/mem.lime linux.check_syscall.Check_Syscall
+### Section hop (execute in the original section)
+1. Memory Map: find the first section of the main image (UPX0, or the section containing the original code).
+2. `bpm SECTION_VA, 0, x` sets a one-shot guard-page execute breakpoint on that whole region.
+3. `run`. The first instruction executed in that region is usually the OEP. Writes by the decompressor do not trigger an `x` breakpoint.
 
-# Scan active network connections and sockets
-vol -f /tmp/mem.lime linux.sockstat.Sockstat
+### Write-then-execute (crypters, loaders, shellcode stages)
+1. `bp VirtualAlloc`, `bp VirtualProtect`, `bp NtProtectVirtualMemory` (catches direct callers of the native API), and on Windows 10+ `bp VirtualAlloc2`.
+2. On `VirtualAlloc` return (`rtr`), note `rax` (the region). On `VirtualProtect`, read `rcx` (address), `rdx` (size), `r8` (new protection). `0x10/0x20/0x40/0x80` are the `PAGE_EXECUTE*` values.
+3. Set `bpm REGION, 0, x` on a region that was just written and made executable. Continue.
+4. When it fires, you are at the first instruction of the next stage. Dump it before it is freed.
+5. A stage that is a full PE (look for `MZ` at the region start, or a PE header written into it) can be dumped with pe-sieve or `savedata`. Shellcode stays a raw blob with a recorded base address.
 
-# List loaded kernel modules (LKM rootkit detection)
-vol -f /tmp/mem.lime linux.lsmod.Lsmod
-```
+### Exception-driven and other transfers
+- Stubs that transfer through `RtlRestoreContext`, `NtContinue`, an SEH/VEH handler, or `SetThreadContext` on a new thread: break on those APIs and read the new instruction pointer from the `CONTEXT` argument (`Rip` at offset `0xF8` on x64).
+- `CreateThread` / `NtCreateThreadEx` with a start address in a new region: the start address is the next stage.
+- `ResumeThread` on a suspended child after `WriteProcessMemory` is process hollowing. Dump the child, not the parent.
 
----
+### What OEP code looks like
 
-### 9. Velocidex WinPmem (Physical Memory Acquisition for Windows)
+| Toolchain | First instructions at OEP |
+|---|---|
+| MSVC x86 | `call __security_init_cookie` then `jmp __scrt_common_main_seh` |
+| MSVC x64 | `sub rsp, 28h`; `call __security_init_cookie`; `add rsp, 28h`; `jmp __scrt_common_main_seh` |
+| MinGW | `sub rsp, 28h`; set `__mingw_app_type`; `call __tmainCRTStartup` |
+| Delphi | `push ebp; mov ebp, esp; add esp, -10h; mov eax, ...; call @InitExe` |
+| Go | `jmp _rt0_amd64` into the runtime |
+| .NET | No native OEP; the CLR loads metadata. Dump the module and use dnSpy/ILSpy |
 
-Velocidex WinPmem is an open-source, high-performance physical memory acquisition tool for Windows operating systems.
+## Windows: Dumping And Rebuilding Imports
 
-#### Architecture & Driver Mechanisms
-- **Kernel Driver Integration**: Deploys a signed 32-bit or 64-bit kernel driver (`winpmem.sys`) dynamically into the kernel space to establish raw hardware page mapping.
-- **Acquisition Modes (`-m` / `--mode`)**:
-  - **Mode 1 (`MmMapIoSpace`)**: Maps physical memory into kernel virtual address space via the standard NT kernel executive API `MmMapIoSpace`. Reliable on older Windows releases.
-  - **Mode 2 (`\\.\PhysicalMemory`)**: Directly opens and reads the hardware physical memory section object `\Device\PhysicalMemory`. Requires high privilege and is frequently restricted on modern Windows kernels.
-  - **Mode 3 (PTE Remapping)**: Maps physical memory pages directly by editing Page Table Entries (PTEs) in the kernel page table. Completely bypasses kernel restrictions and `MmMapIoSpace` limits on Windows 10, Windows 11, and Windows Server 2019/2022.
-- **Output Formats**:
-  - **Raw Memory Image**: Flat contiguous byte stream of physical RAM blocks.
-  - **Microsoft Crash Dump format (`.dmp`)**: Formatted as a kernel crash dump (`--volume_mode 2`), making it directly loadable into WinDbg for live kernel debugging symbols.
+### pe-sieve and hollows_hunter
+Flags below are the parameter names defined in pe-sieve's and hollows_hunter's `params.h` (2025 sources). Values are numeric indexes into each option's list.
 
-#### CLI Invocations
 ```cmd
-:: Dump physical memory using Mode 1 (standard MmMapIoSpace)
-winpmem.exe -o mem.raw --mode 1
+:: One process. Realigned dump, rebuild imports from IATs, detect shellcode, JSON report.
+pe-sieve64.exe /pid 1234 /dmode 3 /imp 3 /shellc 3 /data 3 /dir C:\lab\pesieve /json /jlvl 1
 
-:: High-performance acquisition using Mode 3 (PTE remapping bypass)
-winpmem.exe -o mem.raw -m 3
-
-:: Generate a Microsoft Crash Dump image compatible with WinDbg
-winpmem.exe -o crash.dmp -m 3 --volume_mode 2
-
-:: Extract driver only (for scripted or manual deployment)
-winpmem.exe -e winpmem.sys
+:: Every process, or by name. Unique output dir per run. Suspend suspicious processes instead of killing.
+hollows_hunter64.exe /pname sample.exe /dmode 3 /imp 1 /shellc 3 /dir C:\lab\hh /uniqd /suspend
+hollows_hunter64.exe /dir C:\lab\hh /uniqd /hooks /threads
 ```
 
-#### Post-Acquisition Volatility 3 Analysis
-Process the captured Windows physical memory image with Volatility 3 plugins:
+| Flag | Values |
+|---|---|
+| `/dmode` | `0` auto, `1` virtual (as in memory), `2` unmapped (raw by section headers), `3` realigned (raw aligned to virtual) |
+| `/imp` | `0` none, `1` auto, `2` unerase existing table, `3` rebuild from IATs (terminated blocks), `4` rebuild (terminated or multi-thunk), `5` rebuild (all blocks) |
+| `/shellc` | `0` none, `1` patterns, `2` statistics, `3` patterns or stats, `4` patterns and stats |
+| `/data` | `0` none … `3` always scan non-executable memory, `4`/`5` include inaccessible pages |
+| `/iat` | Scan for IAT hooks: `0` none, `1`–`3` filter levels |
+| `/threads` | Scan thread start addresses and stacks for shellcode |
+| `/minidmp` | Also write a minidump (`/minidump` is not a flag) |
+| `/refl` | Reflection: scan a clone of the process, not the live one |
+| `/quiet`, `/json`, `/jlvl 0-2`, `/dir PATH` | Output control |
+
+Read `scan_report.json` (and `dump_report.json`) first: it lists which modules were implanted, replaced (hollowed), or patched, with addresses. Dumped files are named by base address, for example `400000.sample.exe`, and shellcode regions as `.shc`.
+
+### Scylla (x64dbg plugin or standalone)
+Scylla works on x86 and x64. Use the 32-bit Scylla (or x32dbg) for 32-bit targets. ImportREC is x86-only; never use it on a 64-bit image.
+
+1. Stop at the OEP in x64dbg. Open Plugins → Scylla. It attaches to the debuggee.
+2. `OEP` field: the VA of the current instruction (Scylla fills it from `cip`).
+3. `IAT Autosearch`. Check the found `VA` and `Size` against what you see in the dump view: a table of pointers into system DLLs.
+4. `Get Imports`. Expand the tree. Invalid entries are red.
+5. For invalid entries: right-click → `Trace`/`Disassemble`. A packer often redirects through a thunk (`push api; ret`, `jmp [api]`, or an encrypted pointer). Resolve the real API, edit the entry, or `Cut thunk` if it is junk.
+6. `Dump` → `sample_dump.exe`. Then `Fix Dump` on that file → `sample_dump_SCY.exe` with a new `.SCY` section holding the rebuilt import directory.
+7. Load `_SCY.exe` in IDA or Ghidra. Check that imports resolve and that calls through the IAT show API names.
+
+Iron rules (also in `SKILL.md`):
+- If Scylla cannot resolve the IAT, or the fixed dump fails to parse, stop. Record `E-iat-repair-fail` with the tool, PID, and error. Switch to runtime evidence: breakpoints or Frida hooks on the APIs you need, in the VM. Do not loop on manual IAT edits.
+- If the fixed dump crashes when run, it may check its own file size, checksum, or path. Record `E-self-check-crash`. Find the check with breakpoints on `CreateFileW`, `GetFileSize(Ex)`, `ReadFile`, `GetModuleFileNameW` and hash routines. Do not keep patching headers.
+- A dump that does not run is still a valid static artifact. Say which you hold.
+
+### Exit-time dump
+When the stub detects analysis and exits, the unpacked code is often still mapped at the moment of exit.
+
+```text
+bp kernel32.ExitProcess
+bp ntdll.NtTerminateProcess
+erun
+// on hit, before continuing:
+minidump "C:\lab\exit.dmp"
+```
+
+Then run `pe-sieve64.exe /pid PID /dmode 3 /imp 1 /dir C:\lab\exit` while the process is still paused at the breakpoint. `uv run scripts/dump_memory.py` does not support Windows; it prints a pointer to procdump/WinDbg and exits. `procdump64.exe -ma PID C:\lab\full.dmp` and WinDbg `.dump /ma C:\lab\full.dmp` are the alternatives. Record `E-mem-dump-exitprocess`.
+
+## Linux ELF Unpacking
+Run in the Linux lab container or VM. Verified on Ubuntu 24.04 AArch64 with a UPX-packed static binary.
+
+After the stub runs, the unpacked image is an **anonymous** mapping at the original load address. The packed file maps only a small region:
+
+```text
+00400000-0047b000 r-xp 00000000 00:00 0           <- unpacked code, no backing file
+0048c000-00490000 r--p 00000000 00:00 0
+00490000-00497000 rw-p 00000000 00:00 0
+ffff9f8a0000-ffff9f8a1000 r--p ... /tmp/packed    <- the stub's own file mapping
+```
+
+Dump options, in the guest:
+
 ```bash
-# Process enumeration (standard active process tree)
-vol.py -f mem.raw windows.pslist
-
-# Detect hidden processes via DKOM (comparing PsActiveProcessHead vs thread scanning)
-vol.py -f mem.raw windows.psscan
-
-# Identify process tree hierarchy
-vol.py -f mem.raw windows.pstree
-
-# Detect injected code, shellcode, and unmapped executable memory segments
-vol.py -f mem.raw windows.malfind
-
-# Enumerate active and closed network connections / sockets
-vol.py -f mem.raw windows.netscan
-
-# Enumerate loaded DLLs for a suspicious process PID
-vol.py -f mem.raw windows.dlllist --pid <target_pid>
-
-# Scan for injected or unlinked kernel drivers
-vol.py -f mem.raw windows.driverscan
-
-# Dump memory segment containing injected payload
-vol.py -f mem.raw windows.malfind --pid <target_pid> --dump
+PID="$(pgrep -n sample)"
+uv run scripts/dump_memory.py "$PID" -o dump_x -p x       # executable regions only (default filter is 'w')
+uv run scripts/dump_memory.py "$PID" -o dump_all -p all   # everything up to 256 MB per region
+uv run scripts/dump_memory.py "$PID" -o dump_core --gdb   # gcore via gdb
+gdb -q -nx -batch -p "$PID" -ex "gcore /tmp/sample.core"  # same, directly
 ```
 
+`dump_memory.py` filters by permission characters. The default `-p w` dumps only writable regions and misses unpacked code that the stub re-protected as `r-x`. Use `-p x` or `-p all` for unpacking. Files are named `mem_<start>_<end>_<perms>_<path>.bin`; an anonymous region is `anon`. The script needs read access to `/proc/PID/mem`: same UID and a permissive Yama `ptrace_scope`, or root.
 
-## Boundaries & Anti-Patterns
-- **Do not run unknown packed binaries on bare-metal workstations**: Execute unpacking and dynamic observation only within disposable research VMs.
-- **Do not attempt to execute raw memory dumps directly**: Memory dumps require header reconstruction, section alignment adjustment, and IAT rebuilds before they can run; they are intended for static decompiler analysis.
-- **Do not confuse Virtual Size with Raw Size**: Memory dumps reflect Virtual Size (aligned to page boundaries, e.g. `0x1000`). Disk binaries reflect Raw Size (aligned to file boundaries, e.g. `0x200`). Adjust headers accordingly.
+Stopping at the transfer instead of after the fact:
+- gdb: `catch syscall mprotect` and `catch syscall munmap`. The UPX stub `munmap`s itself just before jumping to the original entry. At the last `munmap` return, `stepi` until the PC lands in the anonymous region. Read the original entry point from the restored ELF header at the region start (`x/gx 0x400018` on a non-PIE x86-64 or AArch64 binary is `e_entry`).
+- Packers that `memfd_create` + `execve` the payload: `catch syscall memfd_create execve execveat`. The payload is `/proc/PID/fd/N`; copy it before `execve`.
+- Packers that decrypt into `mmap(PROT_READ|PROT_WRITE)` then `mprotect(PROT_EXEC)`: at the `mprotect` catchpoint the region is complete.
+
+Analyze the result:
+- A core file (`gcore`) is an ELF with one `PT_LOAD` per mapping. IDA and Ghidra load it with all segments at their runtime addresses.
+- A raw region dump has no headers of its own unless the stub restored them. Load it in the disassembler as a binary at the region's start address. For a non-PIE image whose first page holds the restored ELF header, `readelf -h` on the dump works.
+- `uv run scripts/elf_triage.py dump.bin` and `uv run scripts/elf_symbols.py dump.bin` work on a dump that still has valid headers.
+
+## Android DEX And Native Unpacking
+On a rooted lab device or emulator (pre-flight gate in [frida.md](../04-tool-usage/frida.md)):
+
+```bash
+PACKAGE_ID="$(apkanalyzer manifest application-id target.apk)"
+uv run --with frida-dexdump frida-dexdump -U -f "$PACKAGE_ID" -d -o "./dex_$PACKAGE_ID"
+```
+
+`frida-dexdump` scans process memory for `dex\n0` headers, and with `-d` also for headerless DEX by structure. Spawn mode (`-f`) waits `--sleep` seconds (default 5) before scanning, so the packer has time to decrypt. Packers that decrypt per method (instruction-level protection) leave stub methods in the dump; those methods' code arrives only when invoked.
+
+Hook points when you need the exact moment of loading:
+- `dalvik.system.InMemoryDexClassLoader.$init` and `dalvik.system.DexClassLoader.$init` (Java).
+- `libart.so` `art::DexFileLoader::OpenCommon` / `art::DexFile::DexFile` (native, name varies by Android version; resolve with `ApiResolver('module').enumerateMatches('exports:libart.so!*Dex*Open*')`).
+- `android_dlopen_ext` for native payloads written to app storage and loaded.
+
+Native `.so` unpacking on Android follows the Linux procedure. `/proc/PID/maps` and `/proc/PID/mem` are readable with root.
+
+## Emulation-Based Unpackers
+Emulators run the stub without a real OS. They still execute sample-controlled logic in your process, so run them in the lab container, not on the host.
+
+| Tool | Command | Scope |
+|---|---|---|
+| unipacker | `unipacker sample.exe -d out/` (`-p` partitions output by packer, `-i` interactive) | 32-bit PE: ASPack, FSG, MEW, MPRESS, PEtite, UPX, Yoda's; generic unpacking for others. Its pinned `unicorn` fork failed to build on macOS arm64; use an x86-64 Linux container |
+| speakeasy | `speakeasy -t sample.exe -o report.json --no-mp --timeout 60`; shellcode: `speakeasy -t sc.bin --raw --arch amd64 -o report.json` (`--arch` is `x86` or `amd64`) | Windows PE, drivers, shellcode. Report lists API calls, dropped files (`--dropped-files-path`), and memory activity |
+| qiling | `qltool run -f sample --rootfs ROOTFS --timeout 60000000 -c cov.drcov`; shellcode: `qltool code --os linux --arch x8664 --format bin -f sc.bin` | Linux, Windows, macOS, firmware ISAs. Needs a rootfs with the target's libraries. `--timeout` is in microseconds |
+
+Emulator results are evidence of behavior under that emulator. A stub that checks for missing APIs or timing may take a different path. Confirm the dumped stage against a VM run before concluding.
+
+## Physical Memory And Volatility 3
+Use a full memory image when the code hides from user-mode tools (rootkits, injection into other processes, DKOM), or when the VM is about to be reverted. A process dump is faster when one process is enough.
+
+| Need | Tool |
+|---|---|
+| One process, user mode | pe-sieve, procdump, `dump_memory.py`, `gcore` |
+| Whole Linux guest | AVML in the guest, or the hypervisor's memory snapshot |
+| Whole Windows guest | WinPmem in the guest, or the hypervisor's memory snapshot |
+| No in-guest tool allowed | QEMU `dump-guest-memory -z` from the monitor, or a VMware `.vmem` from a suspended VM |
+
+Acquisition, inside the guest:
+
+```bash
+sudo ./avml acquire mem.lime                     # current AVML (subcommands)
+sudo ./avml mem.lime                             # older releases (no subcommands)
+sudo ./avml acquire --compress mem.lime.compressed
+./avml convert mem.lime.compressed mem.lime      # decompress before Volatility unless your vol has AVML support
+```
+
+```cmd
+:: WinPmem mini (current Velocidex release). Default on x64 is PTE remapping (-2).
+winpmem_mini_x64_rc2.exe C:\lab\physmem.raw
+winpmem_mini_x64_rc2.exe -1 C:\lab\physmem.raw      :: \Device\PhysicalMemory method
+```
+
+The older WinPmem options `--mode`, `-m 3`, and `--volume_mode` belong to retired builds. Check `winpmem_mini_x64_rc2.exe -h` on the build you have.
+
+Volatility 3 (`vol` from `pip install volatility3`; `vol.py` from a git checkout). Plugin names below were checked against the installed volatility3 plugin list. Global options such as `-f`, `-o` (output directory), `-r` (renderer: `pretty`, `csv`, `json`, `jsonl`), and `-q` go before the plugin name.
+
+```bash
+IMG=physmem.raw
+OUT=vol_out && mkdir -p "$OUT"
+vol -f "$IMG" windows.info
+vol -f "$IMG" -r csv windows.pstree > "$OUT/pstree.csv"
+vol -f "$IMG" windows.psscan                         # pool scan; finds unlinked processes
+vol -f "$IMG" windows.psxview                         # cross-view hidden-process check
+vol -f "$IMG" windows.cmdline
+vol -f "$IMG" windows.malfind --pid 1234
+vol -f "$IMG" -o "$OUT" windows.malfind --pid 1234 --dump
+vol -f "$IMG" windows.hollowprocesses
+vol -f "$IMG" windows.ldrmodules --pid 1234           # modules missing from loader lists
+vol -f "$IMG" windows.vadinfo --pid 1234
+vol -f "$IMG" -o "$OUT" windows.pslist --pid 1234 --dump
+vol -f "$IMG" -o "$OUT" windows.dlllist --pid 1234 --dump
+vol -f "$IMG" -o "$OUT" windows.pedump --pid 1234 --base 0x7ff6a0000000
+vol -f "$IMG" windows.netscan
+vol -f "$IMG" windows.ssdt
+vol -f "$IMG" windows.callbacks
+vol -f "$IMG" windows.driverscan
+```
+
+```bash
+IMG=mem.lime
+vol -f "$IMG" linux.pslist
+vol -f "$IMG" linux.psscan
+vol -f "$IMG" linux.pstree
+vol -f "$IMG" linux.malfind
+vol -f "$IMG" -o "$OUT" linux.proc.Maps --pid 1234 --dump
+vol -f "$IMG" -o "$OUT" linux.elfs --pid 1234 --dump
+vol -f "$IMG" linux.check_syscall.Check_syscall
+vol -f "$IMG" linux.hidden_modules
+vol -f "$IMG" linux.lsmod
+vol -f "$IMG" linux.sockstat
+vol -f "$IMG" linux.bash
+```
+
+- Short names (`windows.pslist`) resolve to the full class (`windows.pslist.PsList`) when unique. Class names are case-sensitive: `linux.check_syscall.Check_syscall`, not `Check_Syscall`.
+- Newer releases also list malware plugins under `windows.malware.*` and `linux.malware.*`. The old names still resolve.
+- Windows symbols: Volatility downloads PDB-derived symbol tables from Microsoft on first use. In an `offline` lab, pre-populate the symbol cache or the run fails with an unsatisfied requirement.
+- Linux symbols: you need an ISF JSON for the exact kernel build, made with `dwarf2json linux --elf vmlinux-with-debuginfo`, placed in the `symbols/linux/` directory (or passed with `-s`). No matching ISF, no Linux plugin output.
+- A `malfind` hit is a candidate: private, executable, often `PAGE_EXECUTE_READWRITE` memory. JIT engines (.NET, browsers) produce benign hits. Confirm with the dumped bytes.
+
+## Devirtualization Boundary
+Dumping after OEP removes the outer packer. It does not remove a code virtualizer. VMProtect and Themida leave selected functions as bytecode run by a handler loop. Signs: a function body that pushes context and jumps into a dispatcher with an indirect `jmp reg` over a handler table.
+
+- Treat each virtualized function as a black box. Record its inputs and outputs from a trace or a hook.
+- Lifting (Triton, Miasm, VTIL-based tools, NoVmp for some VMProtect 3 builds) is version-specific. A lift is validated only when it reproduces the observed input/output pairs.
+- The staged procedure for recovering logic from black boxes is in [fuzzing-for-reversing.md](fuzzing-for-reversing.md) and [deobfuscation-anti-analysis.md](../01-static-architectures/deobfuscation-anti-analysis.md).
+
+## Verification
+- An unpacked artifact is accepted when: the disassembler shows code at the claimed OEP, imports resolve to API names, and strings that were absent in the packed file are present.
+- Record the OEP as an RVA, the method used to find it, the dump tool and mode, and the import repair result.
+- Compare a behavior from the dump (a string, a config field, an API sequence) with the live run. They must agree.
+- For memory images, record the acquisition tool and version, the image hash, the Volatility version, and the symbol source.
+
+## Boundaries
+- Static unpackers (`upx -d`) can run on the host because they do not execute the sample. Everything else runs in the lab.
+- Do not run a dumped or fixed binary outside the lab. It is still the sample.
+- Do not paste multi-megabyte dumps into the conversation. Keep paths, hashes, and the relevant offsets.
+- A dump that will not run is still a valid static artifact. Do not spend the session making it run.

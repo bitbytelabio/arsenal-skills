@@ -1,297 +1,317 @@
-# Native C/C++ ABI, Calling Conventions & Data Structures
+# Native C/C++ ABI, Calling Conventions, And Data Structures
 
-## 1. Title & Overview
-- **Domain**: Native compiled binaries (C and C++ compiled with MSVC, GCC, and Clang targeting x86-64, ARM64, and x86-32 architectures).
-- **Scope**: Reversing calling conventions (System V AMD64, Microsoft x64, ARM64 AAPCS, cdecl, stdcall, thiscall), extracting and typing virtual method tables (vtables), decoding Runtime Type Information (MSVC RTTI vs Itanium C++ ABI typeinfo), reconstructing C++ Standard Template Library (STL) container layouts (`std::string`, `std::vector`, `std::map`, `std::unique_ptr`, `std::shared_ptr`), and analyzing multiple/virtual inheritance `this`-pointer adjustment thunks.
+## When To Open
+Open this file for native C or C++ built by MSVC, GCC, or Clang (x86, x64, ARM64) when you need to type functions, recover classes, or read STL objects. Typical signs are `.?AV` / `.?AU` strings, `??_7` / `_ZTV` symbols, indirect calls through `[reg+N]` after loading `[obj]`, and `std::` strings in panics or exceptions. Go and Rust have their own files ([native-golang.md](native-golang.md), [native-rust.md](native-rust.md)).
 
----
-
-## 2. Trigger Conditions & Detection Indicators
-Engage this reference when analyzing native non-managed binaries exhibiting object-oriented or structured C/C++ compiled constructs:
-
-### Binary Signatures & Section Clues
-- **PE Binaries (MSVC)**:
-  - Sections: `.rdata` contains pointer tables followed by RTTI descriptors; `.pdata` contains exception handling function tables.
-  - Mangled symbol prefixes: `?` (e.g., `?method@Class@@QEAAXXZ`), decorated vtable symbols `??_7<Class>@@6B@`.
-  - Type descriptor strings in `.data` or `.rdata`: `.?AV<ClassName>@@` (e.g., `.?AVbad_alloc@std@@`, `.?AVMyClass@@`).
-- **ELF & Mach-O Binaries (GCC / Clang - Itanium ABI)**:
-  - Mangled symbol prefixes: `_Z` (e.g., `_ZN5Class6methodEv`), vtable references `_ZTV<name>`, typeinfo references `_ZTI<name>`, typeinfo names `_ZTS<name>`.
-  - Sections: `.rodata` contains vtables with null-delimited mangled names immediately preceding typeinfo nodes.
-- **Assembly Indicators**:
-  - Indirect virtual dispatch calls: `mov rax, [rdi]; call qword ptr [rax + 0x18]` (Itanium) or `mov rax, [rcx]; call qword ptr [rax + 0x20]` (MSVC).
-  - Base class `this` adjustments before dispatch: `add rdi, -0x10` or `sub rcx, 0x10` preceding a virtual method call or within an adjustor thunk.
+Scope: calling conventions per platform, vtable and RTTI layouts (MSVC and Itanium), multiple and virtual inheritance, constructor/destructor recognition, STL layouts for MSVC STL / libstdc++ / libc++, and struct recovery.
 
 ---
 
-## 3. Tooling & CLI/MCP Actions
-- **Headless IDA Pro MCP / Disassembler**:
-  - `open_binary`: Load target binary into the analysis session.
-  - `get_procedure`: Retrieve disassembly of prospective virtual dispatch sites and constructors.
-  - `get_pseudocode`: Generate decompiler pseudocode for member functions.
-  - `set_local_type` / `apply_type`: Inject class vtable structs and class layouts into Hex-Rays / local types.
-- **CLI & Symbol Utilities**:
-  - GCC/Clang symbol demangling: `c++filt -_ <mangled_symbol>`
-  - MSVC symbol demangling: `undname -f <mangled_symbol>`
-  - Section symbol dumping:
-    ```bash
-    # Linux / ELF: Find Itanium RTTI symbols
-    readelf -Ws <binary> | grep -E '_ZTV|_ZTI|_ZTS'
-    # Windows / PE: Dump export names and symbol table
-    dumpbin /exports /symbols <binary.exe>
-    # String scan for MSVC RTTI descriptors
-    strings -a -t x <binary.exe> | grep '\.\?AV'
-    ```
+## 1. Identify The Compiler And C++ ABI
 
----
+| Evidence | Toolchain / ABI |
+|---|---|
+| `.?AV`/`.?AU` strings, `??_7` symbols, Rich header, `_CxxThrowException`, `__CxxFrameHandler3/4`, `vcruntime140.dll` | MSVC ABI (MSVC or `clang-cl`) |
+| `_ZTV`/`_ZTI`/`_ZTS` symbols, `__cxa_throw`, `__gxx_personality_v0`, `libstdc++.so.6` | Itanium ABI with libstdc++ (GCC, or Clang on Linux) |
+| `std::__1::` or `NSt3__1` in names, `libc++.so` / `libc++abi`, `libc++_shared.so` on Android | Itanium ABI with libc++ (Apple, Android NDK, some Linux) |
+| MinGW: `_ZTV` symbols inside a PE, `libstdc++-6.dll`, `libgcc_s_seh-1.dll` | Itanium ABI on Windows. Calling convention is still Microsoft x64. |
+| `__cxx11` in names (`NSt7__cxx1112basic_string`) | libstdc++ C++11 ABI string (GCC 5+). Absent means the old COW string. |
 
-## 4. Core Methodologies & Step-by-Step Technical Workflow
-
-### 4.1 Calling Convention Normalization & Parameter Mapping
-When analyzing decompiled or disassembled code, parameter registers and stack frames differ sharply based on target platform:
-
-| Calling Convention | Architecture | Integer / Pointer Arguments | Float / SIMD Arguments | `this` Pointer | Return Value | Shadow / Stack Reservation |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **System V AMD64** | Linux / macOS x86-64 | `RDI, RSI, RDX, RCX, R8, R9` | `XMM0 - XMM7` | `RDI` (first arg) | `RAX` (int), `XMM0` (float) | None (128-byte red zone below `rsp`) |
-| **Microsoft x64** | Windows x86-64 | `RCX, RDX, R8, R9` | `XMM0 - XMM3` | `RCX` (first arg) | `RAX` (int), `XMM0` (float) | 32-byte caller-allocated shadow store |
-| **ARM64 (AAPCS64)** | Linux / Android / iOS / Win | `X0 - X7` | `V0 - V7` (D0-D7/S0-S7) | `X0` (first arg) | `X0` (or `X8` for large structs) | None |
-| **x86-32 __thiscall** | Windows MSVC x86 | Stack (right to left) | Stack | `ECX` | `EAX` | Callee cleans stack |
-| **x86-32 __cdecl** | Linux / Windows x86 | Stack (right to left) | Stack | Stack (first pushed) | `EAX` / `ST0` | Caller cleans stack |
-
-#### Workflow:
-1. Identify the host OS and compiler from the binary header.
-2. In MSVC x64, account for the mandatory 32-byte shadow space (`[rsp + 0x00]` through `[rsp + 0x18]`). Function prologues commonly spill incoming argument registers (`RCX, RDX, R8, R9`) back into their home locations in the caller's frame (`[rsp + 0x08]`, `[rsp + 0x10]`, etc.).
-3. Identify constructor methods: Look for functions receiving a pointer in the `this` register (`RCX` or `RDI` or `X0`), writing immediate addresses (vtable pointers) into `[this + 0x00]`, and returning `this`.
-
----
-
-### 4.2 Vtable Pointer Array Extraction & Virtual Dispatch Recovery
-Virtual method tables are arrays of function pointers placed into read-only data sections (`.rodata` in ELF, `.rdata` in PE).
-
-#### Memory Structure:
-- Each polymorphic C++ class containing virtual methods has an associated vtable.
-- The object instance stores a hidden pointer (`vptr`) at offset `0x0` pointing into the vtable method slot array.
-- In single inheritance:
-  ```text
-  Object Layout:
-  [+0x00] vptr -------------------> Vtable in .rodata/.rdata:
-  [+0x08] member_1                   Slot 0: &Class::Method0
-  [+0x10] member_2                   Slot 1: &Class::Method1
-                                     Slot 2: &Class::Method2
-  ```
-
-#### Recovery Workflow:
-1. Search `.rdata` or `.rodata` for sequential clusters of valid executable code pointers (`.text`).
-2. Identify cross-references (`xrefs`) to the start of this pointer array:
-   - If referenced from inside a function that stores the address to `*(arg0 + 0)`, that function is a constructor (`ClassName::ClassName`) or destructor.
-3. Trace indirect calls in callers:
-   ```nasm
-   mov     rax, [rcx]           ; Load vtable pointer from object
-   call    qword ptr [rax+10h]  ; Call 3rd virtual function (Slot 2, index 0x10/8 = 2)
-   ```
-4. Define a C-structure in the disassembler representing the vtable:
-   ```c
-   struct ClassName_Vtbl {
-       void (*Method0)(ClassName* this);
-       int  (*Method1)(ClassName* this, int a);
-       void (*Method2)(ClassName* this, const char* str);
-   };
-   ```
-5. Apply `ClassName*` to the `this` argument register across candidate call sites.
-
----
-
-### 4.3 RTTI Structure Reconstruction: MSVC vs Itanium ABI
-
-#### A. MSVC Complete Object Locator
-On MSVC, preceding the first virtual method pointer in the vtable (at index `-1`, i.e., `vtable - 8` on x64), there is a pointer to the `_RTTICompleteObjectLocator` structure.
-
-```text
-MSVC Structure Hierarchy:
-vtable address ---> [ Slot 0: &Method0 ]
-[vtable - 0x08] ---> Pointer to _RTTICompleteObjectLocator
-
-struct _RTTICompleteObjectLocator (x64 / 32-bit RVAs):
-  +0x00: uint32_t signature;           // 0 = 32-bit absolute, 1 = 64-bit relative RVAs
-  +0x04: uint32_t offset;              // Offset of this vptr within complete object
-  +0x08: uint32_t cdOffset;            // Constructor displacement offset
-  +0x0C: int32_t  pTypeDescriptor;     // ImageBase-relative RVA to TypeDescriptor
-  +0x10: int32_t  pClassDescriptor;    // ImageBase-relative RVA to _RTTIClassHierarchyDescriptor
-  +0x14: int32_t  pSelf;               // ImageBase-relative RVA back to complete object locator
-
-struct TypeDescriptor:
-  +0x00: void* pVFTable;               // &type_info::`vftable'
-  +0x08: void* spare;                  // Reserved runtime pointer
-  +0x10: char  name[];                 // Mangled type name: ".?AVClassName@@"
+```bash
+llvm-undname '?f@D@ns@@UEAAHXZ'          # MSVC: "public: virtual int __cdecl ns::D::f(void)"
+llvm-undname '??_7D@ns@@6BB@@@'          # "const ns::D::`vftable'{for `B'}"
+echo _ZN2ns1D1fEv | c++filt              # Itanium; llvm-cxxfilt also works. llvm-cxxfilt does not decode MSVC names.
+readelf -sW "$BIN" | c++filt | grep -E 'vtable for|typeinfo for'
+strings -a -t x "$BIN" | grep -E '\.\?A[VUW]'   # MSVC TypeDescriptor names
 ```
 
-#### B. Itanium C++ ABI (GCC / Clang)
-Under Itanium ABI, the vtable pointer points directly to the first virtual function slot. Offsets `-1` and `-2` contain explicit type and offset information:
-- `vtable[-1]` (`vtable - 0x08` on 64-bit): Pointer to `abi::__class_type_info` (or derivative `abi::__si_class_type_info`, `abi::__vmi_class_type_info`).
-- `vtable[-2]` (`vtable - 0x10` on 64-bit): `offset_to_top` (signed integer representing distance from this subobject vptr to the complete object beginning).
-
-```text
-Itanium Layout:
-[vtable - 0x10] -> ptrdiff_t offset_to_top
-[vtable - 0x08] -> Pointer to std::type_info (e.g. abi::__si_class_type_info)
-vtable base   ---> [ Slot 0: &VirtualMethod0 ]
-                   [ Slot 1: &VirtualMethod1 ]
-
-abi::__si_class_type_info structure:
-  +0x00: void* vtable;                 // Pointer to vtable of abi::__si_class_type_info
-  +0x08: const char* type_name;        // Pointer to mangled string: "_ZTS9ClassName"
-  +0x10: abi::__class_type_info* base; // Pointer to parent base class type_info
-```
+On Windows hosts `undname.exe` ships with Visual Studio. `dumpbin /headers /exports` (VS) or `llvm-readobj --coff-exports` show the PE surface.
 
 ---
 
-### 4.4 Multiple Inheritance & `this`-Pointer Adjustment Thunks
-When a class inherits from multiple base classes, an instance possesses multiple vtable pointers (`vptrs`), one for each base with virtual methods:
+## 2. Calling Conventions
+
+| Convention | Integer/pointer args | FP args | `this` | Return | Stack rules |
+|---|---|---|---|---|---|
+| System V AMD64 (Linux, macOS, BSD) | `RDI RSI RDX RCX R8 R9` | `XMM0`–`XMM7` | `RDI` | `RAX`(:`RDX`), `XMM0`(:`XMM1`) | 128-byte red zone below `RSP`. `AL` = number of vector regs for variadic calls. |
+| Microsoft x64 | `RCX RDX R8 R9` (positional, shared with `XMM0`–`XMM3`) | `XMM0`–`XMM3` | `RCX` | `RAX`, `XMM0` | Caller reserves 32-byte home space. At callee entry it is `[rsp+8]`..`[rsp+0x20]`. Structs > 8 bytes or not 1/2/4/8 are passed by pointer. |
+| AAPCS64 (Linux, Android) | `X0`–`X7` | `V0`–`V7` | `X0` | `X0`(:`X1`), `V0` | Indirect result pointer in `X8`. `X18` platform register. |
+| Apple ARM64 | as AAPCS64 | as AAPCS64 | `X0` | as AAPCS64 | Variadic args always on the stack. `X18` reserved. Stack args use natural alignment, not 8-byte slots. |
+| Windows ARM64 | as AAPCS64 | as AAPCS64 | `X0` | as AAPCS64 | `X18` = TEB. Variadic calls use no FP registers. Floats go through `X0`–`X7`, then the stack. |
+| x86 `__cdecl` | Stack, right to left | Stack | n/a | `EAX`(:`EDX`), `ST0` | Caller cleans (`add esp, N` after the call) |
+| x86 `__stdcall` (Win32 API) | Stack | Stack | n/a | `EAX` | Callee cleans (`ret N`). Decorated `_name@N`. |
+| x86 `__fastcall` | `ECX`, `EDX`, then stack | Stack | n/a | `EAX` | Callee cleans. `@name@N`. |
+| x86 MSVC `__thiscall` | Stack | Stack | `ECX` | `EAX` | Callee cleans |
+| x86 GCC/Clang member functions | Stack | Stack | First stack arg | `EAX` | Caller cleans. No `ECX` `this`. |
+
+Non-volatile (callee-saved) registers: SysV `RBX RBP R12–R15`. Microsoft x64 adds `RDI RSI` and `XMM6`–`XMM15`. AAPCS64 `X19`–`X28`, low 64 bits of `V8`–`V15`.
+
+### Hidden Struct Return
+A non-trivially-copyable or large return value goes through a hidden pointer:
+- SysV: `RDI` = return buffer, `RSI` = `this`. The function returns the buffer in `RAX`.
+- Microsoft x64: free function `RCX` = buffer. Member function `RCX` = `this`, `RDX` = buffer. Returns the buffer in `RAX`.
+- AAPCS64 / Apple: `X8` = buffer. Windows ARM64 uses `X8` only for plain aggregates. Non-aggregate C++ types pass the buffer in `X0`, or in `X1` when `this` is in `X0`, and return it in `X0`.
+
+A function that writes several fields through its first argument and returns it is a struct return, not a `void f(T*)`.
+
+---
+
+## 3. Vtables
+
+### Itanium (GCC, Clang, MinGW)
+A vtable group per class has one vtable per polymorphic base subobject. The object's vptr points at the first function slot, not the start of the symbol.
 
 ```text
-class Derived : public BaseA, public BaseB { ... };
-
-Derived Object Layout:
-  +0x00: BaseA vptr --------> Derived's BaseA vtable
-  +0x08: BaseA members
-  +0x10: BaseB vptr --------> Derived's BaseB vtable (Offset: +0x10)
-  +0x18: BaseB members
-  +0x20: Derived members
+_ZTV7Derived (vtable for Derived):
+  [vptr-0x10-8n]  vcall offsets / vbase offsets   (only with virtual bases)
+  [vptr-0x10]     offset_to_top  (ptrdiff_t; 0 for primary, -N for a base at +N)
+  [vptr-0x08]     &_ZTI7Derived  (typeinfo)
+  [vptr+0x00]     slot 0 ...
+  next group:     offset_to_top = -0x10, &_ZTI7Derived, thunk slots for the secondary base
 ```
+- A virtual destructor takes two slots: D1 complete-object (`_ZN1AD1Ev`) then D0 deleting (`_ZN1AD0Ev`). D0 calls D1 and then `operator delete` (`_ZdlPv` / `_ZdlPvm`).
+- A pure virtual slot points to `__cxa_pure_virtual`. That class is abstract.
+- Construction vtables (`_ZTC`) and the VTT (`_ZTT`) exist when there are virtual bases. Constructors take a VTT pointer as a hidden argument in that case.
 
-#### Adjustor Thunk Mechanics:
-If `Derived` overrides a virtual method defined in `BaseB`, calling it through a `BaseB*` passes a pointer pointing at `object + 0x10`. The overridden method expects the full `Derived*` at offset `0x00`. The compiler emits an **adjustor thunk**:
+Verified with Clang/libc++ (arm64): for `struct D : A, B` with 8-byte members, `offset_to_top` of the `B` vtable inside `D` is `-16`. For `struct V : virtual A`, `vtable[-3]` (the vbase offset) is `16`.
+
+### MSVC
+```text
+[vftable-8 / -4]  pointer (absolute VA, relocated) to RTTICompleteObjectLocator
+[vftable+0]       slot 0 ...
+```
+- One vftable per base that has virtual functions. Symbols `??_7Derived@@6B@` (single) or `??_7Derived@@6BBase@@@` ("for Base").
+- A virtual destructor is one slot: the scalar deleting destructor `??_G` (or vector deleting `??_E`). It takes a flags argument. `flags & 1` means call `operator delete` after the destructor.
+- Virtual bases use a separate vbptr and `??_8Class@@7B@` vbtable. Entry 0 is the offset from the vbptr to the object start (usually 0). Entry `i` is the offset from the vbptr to virtual base `i`. A `vtordisp` slot sits 4 bytes before a virtual base when constructors or destructors call virtuals.
+- With `/GR-` there is no COL. The `vftable-8` slot then belongs to the previous data item.
+
+### Dispatch Patterns
 ```nasm
-; System V x86-64 adjustor thunk
-Derived::BaseB_Thunk_Method:
-    add     rdi, -0x10          ; Adjust 'this' from BaseB subobject to Derived root
-    jmp     Derived::Method     ; Jump directly to actual implementation
-
-; MSVC x64 adjustor thunk
-[thunk]:Derived::BaseB_Thunk_Method`adjustor{16}':
-    sub     rcx, 10h            ; Adjust 'this' pointer from BaseB to Derived
-    jmp     Derived::Method
+mov rax, [rcx]          ; vptr (MSVC this = RCX; SysV this = RDI)
+call qword ptr [rax+18h] ; slot 3 on x64 (0x18/8)
 ```
-**Reversing Action**: When decompiling, if a function simply adds or subtracts a small constant from `rcx`/`rdi` and immediately branches, mark it as an adjustor thunk. Identify the delta to determine the exact subobject offset in the composite struct.
-
----
-
-### 4.5 STL Container Memory Layout Recognition
-
-#### 1. `std::string` (Small String Optimization / SSO)
-Implementations maintain an internal inline buffer for small strings to avoid heap allocation:
-- **MSVC (64-bit)**: Total size 32 bytes (`0x20`).
-  ```text
-  +0x00: union {
-             char  _Buf[16];        // Used when _Mysize < 16
-             char* _Ptr;            // Pointer to heap buffer when _Mysize >= 16
-         } _Bx;
-  +0x10: uint64_t _Mysize;          // Current string character count
-  +0x18: uint64_t _Myres;           // Allocated capacity (15 for SSO buffer)
-  ```
-  *Indicator*: If `_Myres >= 16`, string text resides at `*(ptr + 0x00)`; if `_Myres < 16`, text resides directly at `ptr + 0x00`.
-- **libstdc++ (GCC, 64-bit)**: Total size 32 bytes (`0x20`).
-  ```text
-  +0x00: char* _M_dataptr;          // Points to _M_local_buf (+0x10) or heap memory
-  +0x08: size_t _M_length;          // String length
-  +0x10: union {
-             char _M_local_buf[16]; // SSO storage buffer
-             size_t _M_allocated_cap;
-         };
-  ```
-
-#### 2. `std::vector<T>`
-Consistently implemented across MSVC, GCC, and Clang as a **3-pointer layout** (total size 24 bytes on 64-bit):
 ```text
-+0x00: T* _Myfirst / _M_start;            // Pointer to first allocated element
-+0x08: T* _Mylast  / _M_finish;           // Pointer past the last valid element
-+0x10: T* _Myend   / _M_end_of_storage;   // Pointer past end of allocated memory buffer
+ldr x8, [x0]            ; arm64
+ldr x8, [x8, #0x18]
+blr x8                  ; arm64e: ldraa/blraa with a discriminator
 ```
-- Element Count: `(Mylast - Myfirst) / sizeof(T)`
-- Element Capacity: `(Myend - Myfirst) / sizeof(T)`
+On arm64e (Apple), vtable entries are signed. The discriminator is the slot address blended with a hash of the mangled method name, which can identify the method.
 
-#### 3. Smart Pointers
-- **`std::unique_ptr<T>`**: 8 bytes. Holds the raw heap pointer `T*` directly (assuming default stateless deleter).
-- **`std::shared_ptr<T>`**: 16 bytes.
-  ```text
-  +0x00: T* _Ptr;                         // Pointer to managed object instance
-  +0x08: std::_Ref_count_base* _Rep;      // Pointer to heap control block
+### Thunks
+- Itanium non-virtual thunk `_ZThn16_N7Derived1gEv`: `sub rdi, 16` (or `add rdi, -16`) then `jmp Derived::g`.
+- Itanium virtual thunk `_ZTv0_n24_...`: loads the adjustment from the vtable at `-24`, then jumps.
+- MSVC adjustor thunk `[thunk]:Derived::g'adjustor{16}'`: `sub rcx, 10h` then `jmp`.
+
+The delta in a thunk is the base subobject offset. It corroborates the COL `offset` field or the Itanium `offset_to_top`.
+
+---
+
+## 4. RTTI Layouts
+
+### MSVC (all fields 32-bit)
+In x64 images the pointer fields are image-relative RVAs (`ImageBase + rva`). In x86 images they are absolute VAs. The vftable-to-COL pointer is always a full pointer.
+
+`RTTICompleteObjectLocator` (`??_R4`). Size 0x18 on x64, 0x14 on x86:
+
+| Off | Field | Meaning |
+|---|---|---|
+| 0x00 | `signature` | 1 on x64 (image-relative), 0 on x86 |
+| 0x04 | `offset` | Offset of this vptr in the complete object |
+| 0x08 | `cdOffset` | Constructor displacement (vtordisp) |
+| 0x0C | `pTypeDescriptor` | → `TypeDescriptor` |
+| 0x10 | `pClassDescriptor` | → `RTTIClassHierarchyDescriptor` |
+| 0x14 | `pSelf` | x64 only. RVA of this COL. Best validation check. |
+
+`TypeDescriptor` (`??_R0`). Lives in writable `.data`, because `spare` caches the undecorated name:
+
+| Off x64 / x86 | Field |
+|---|---|
+| 0x00 / 0x00 | `pVFTable` → `type_info::vftable` (`??_7type_info@@6B@`) |
+| 0x08 / 0x04 | `spare` (NULL in the file) |
+| 0x10 / 0x08 | `name`: `.?AV` class, `.?AU` struct, `.?AT` union, `.?AW4` enum, then `Name@Namespace@@` |
+
+`RTTIClassHierarchyDescriptor` (`??_R3`), 0x10 bytes: `signature` (0), `attributes` (`1` multiple inheritance, `2` virtual inheritance, `4` ambiguous), `numBaseClasses` (includes the class itself), `pBaseClassArray` (`??_R2`, array of pointers/RVAs to BCDs, entry 0 is the class itself).
+
+`RTTIBaseClassDescriptor` (`??_R1`), 0x1C bytes: `pTypeDescriptor`, `numContainedBases`, `PMD {mdisp, pdisp, vdisp}` (int32 ×3), `attributes`, `pClassDescriptor`. `mdisp` is the base's offset. `pdisp` is the vbptr offset (`-1` when not virtual). `vdisp` is the index into the vbtable. Attribute bits: `1|8` private on path, `2` ambiguous, `4` private, `0x10` virtual, `0x40` has CHD pointer.
+
+### Itanium typeinfo
+| Class kind | Layout (64-bit) |
+|---|---|
+| No bases: `__class_type_info` | `{vptr, const char* name}` |
+| One public non-virtual base at offset 0: `__si_class_type_info` | `{vptr, name, const __class_type_info* base}` |
+| Anything else: `__vmi_class_type_info` | `{vptr, name, uint32 flags, uint32 base_count, {base_type*, long offset_flags}[base_count]}` |
+
+- `vptr` = `&_ZTVN10__cxxabiv117__class_type_infoE + 16` (or `120__si_` / `121__vmi_`). In a dynamically linked binary these are imported symbols. Every relocation to them marks a typeinfo object, even when the binary is stripped:
+  ```bash
+  readelf -rW "$BIN" | grep -E '__cxxabiv1(17__class|20__si_class|21__vmi_class)_type_info'
   ```
-  The control block holds:
-  - `+0x08`: 32-bit strong reference counter (`use_count`)
-  - `+0x0C`: 32-bit weak reference counter (`weak_count`)
-  - `+0x10`: Custom deleter and allocator storage or embedded `T` instance (if allocated via `std::make_shared`).
+- `name` points to the `_ZTS` string, which is the mangled type **without** `_Z`: `"7Derived"`, `"N2ns1DE"`. Demangle it with `echo _Z<name> | c++filt` or `c++filt -t <name>`.
+- `offset_flags`: bit 0 virtual, bit 1 public, bits 8+ the signed offset. For a virtual base the offset is the vtable position of the vbase offset. Verified: `V : virtual A` gives `0xffffffffffffe803` = virtual|public, offset `-0x18`.
+- Apple arm64 sets bit 63 of `name` for non-unique (hidden visibility) RTTI. Mask it off before you dereference it. Verified on macOS arm64: `0x80000001022385e8`.
 
 ---
 
-## 5. Concrete Code & Script Examples
+## 5. Constructors, Destructors, Allocation
+- A constructor calls base constructors, then stores the class's vptr(s) into `[this+off]`, then initializes members. The stored vtable address names the class.
+- A destructor stores the vptr again at entry (reset to its own class), destroys members in reverse, then calls base destructors.
+- `operator new(size)` immediately followed by a constructor call gives `sizeof(Class)`. MSVC `??2@YAPEAX_K@Z`, Itanium `_Znwm` (64-bit) / `_Znwj` (32-bit).
+- Inlined constructors still store the vtable address. Search for code xrefs to each vtable.
+- Exceptions: MSVC `_CxxThrowException(obj, _ThrowInfo*)`. The ThrowInfo → CatchableTypeArray → CatchableType chain names the thrown type (`??_R0` again). Itanium `__cxa_throw(obj, typeinfo*, dtor)` names it directly.
 
-### Automated MSVC RTTI Parser & Vtable Labeler (IDAPython)
+---
+
+## 6. STL Layouts (64-bit Release Builds)
+
+MSVC debug builds (`_ITERATOR_DEBUG_LEVEL` 1 or 2) add a `_Myproxy` container-proxy pointer at offset 0 of most containers. Everything below then shifts by 8.
+
+### `std::string`
+| Library | Size | Layout | Small-string test | SSO capacity |
+|---|---|---|---|---|
+| MSVC | 32 | `{union{char buf[16]; char* ptr}; size_t size@0x10; size_t cap@0x18}` | `cap < 16` → inline | 15 (`wstring` 7) |
+| libstdc++ C++11 ABI | 32 | `{char* p; size_t len@8; union{char buf[16]; size_t cap}@0x10}` | `p == this+0x10` | 15 |
+| libstdc++ old COW ABI | 8 | `char* p`. Header `{len, cap, refcount}` sits before `p`. | none | n/a |
+| libc++ standard (Linux, Android, Apple x86_64) | 24 | long: `{cap \| 1 (bit 0 = long), size@8, data@0x10}`. short: byte 0 = `size << 1`, chars from +1 | `byte0 & 1` → long | 22 |
+| libc++ alternate (Apple arm64) | 24 | long: `{data, size@8, cap@0x10 with bit 63 = long}`. short: chars from +0, byte 23 = size (bit 7 = long) | `byte23 & 0x80` → long | 22 |
+
+Verified on Apple arm64 libc++: `"short"` = `68 6f 72 74 73 ...` with byte 23 = `0x05`. A 40-char string was `{ptr, 0x28, 0x8000000000000030}`.
+
+### Other Containers
+| Type | MSVC | libstdc++ | libc++ |
+|---|---|---|---|
+| `vector<T>` (24) | `{first, last, end}` | `{start, finish, end_of_storage}` | `{begin, end, cap}` |
+| `unique_ptr<T>` | `T*` (8) | `T*` | `T*` |
+| `shared_ptr<T>` (16) | `{T*, _Ref_count_base*}` | `{T*, _Sp_counted_base*}` | `{T*, __shared_weak_count*}` |
+| control block | `{vptr, int uses@8, int weaks@0xC}` | `{vptr, int use@8, int weak@0xC}` | `{vptr, long shared_owners@8, long weak_owners@0x10}`, both stored as count − 1 |
+| `map`/`set` | `{head*, size}` (16). Node: `{left, parent, right, char color, char isnil, value@0x20}` | `{cmp, header{int color, parent, left, right}@8, count@0x28}` (48). Node: `{color@0, parent@8, left@0x10, right@0x18, value@0x20}` | `{begin_node, root (end_node.left), size}` (24). Node: `{left@0, right@8, parent@0x10, bool black@0x18, value@0x20}` |
+| `list<T>` | `{head*, size}` (16). Node `{next, prev, value}` | `{next, prev, size}` (24), sentinel inline | `{prev, next, size}` (24) |
+| `unordered_map` | `{list (head,size), vector buckets, mask, maxidx, max_load}` (64) | `{buckets, bucket_count, before_begin.next, element_count, rehash_policy{float, next_resize}, single_bucket}` (56) | `{buckets, bucket_count, first_node, size, max_load}` (40) |
+| `std::function` | 64 bytes. Impl pointer in the last slot (`+0x38`). | 32: `{storage[16], manager@0x10, invoker@0x18}` | 32: `{buffer[24], impl*@0x18}` |
+
+libc++ `shared_ptr` counts verified on Apple arm64: two owners gave `shared_owners = 1`. Weak counts in libstdc++ and MSVC include one extra reference held by all strong owners together.
+
+The libc++ map layout above was verified on Apple arm64 (`{begin, root, 1}` with one element). The other rows follow the library headers. Confirm on your sample by finding the size check (`cmp [obj+N], ...`) or the element count increment.
+
+---
+
+## 7. Scripts
+
+### MSVC RTTI Scanner (Static, LIEF)
+Verified on `clang-cl` x64 and x86 PEs: it found both `ns::D` vftables (`offset 0x0` and `0x10` on x64, `0x8` on x86) and the virtual-base layout of `V`.
+
 ```python
-import ida_bytes
-import ida_name
-import ida_segment
-import idc
+# msvc_rtti.py. uv run --with lief python -I msvc_rtti.py "$BIN"
+import struct, sys
+import lief
 
-def parse_msvc_rtti(image_base):
-    """Scan .rdata for _RTTICompleteObjectLocator structures and label vtables."""
-    rdata_seg = ida_segment.get_segm_by_name(".rdata")
-    if not rdata_seg:
-        print("[-] .rdata segment not found.")
-        return
+pe = lief.PE.parse(sys.argv[1])
+base = pe.optional_header.imagebase
+x64 = pe.header.machine == lief.PE.Header.MACHINE_TYPES.AMD64
+secs = [(s.virtual_address, bytes(s.content)) for s in pe.sections]
 
-    ea = rdata_seg.start_ea
-    end_ea = rdata_seg.end_ea
+def rd(rva, n):
+    for va, d in secs:
+        if va <= rva and rva + n <= va + len(d):
+            return d[rva - va: rva - va + n]
 
-    while ea < end_ea - 0x18:
-        # Check signature: 1 = 64-bit relative RVA, 0 = 32-bit absolute
-        sig = ida_bytes.get_dword(ea)
-        if sig == 1:
-            offset = ida_bytes.get_dword(ea + 0x04)
-            cd_offset = ida_bytes.get_dword(ea + 0x08)
-            type_desc_rva = ida_bytes.get_dword(ea + 0x0C)
-            hierarchy_rva = ida_bytes.get_dword(ea + 0x10)
+def u32(rva):
+    b = rd(rva, 4)
+    return struct.unpack("<I", b)[0] if b else None
 
-            # Validate RVAs within binary boundaries
-            if 0 < type_desc_rva < (end_ea - image_base):
-                td_ea = image_base + type_desc_rva
-                # TypeDescriptor begins with vftable pointer (8 bytes), then spare (8 bytes), then mangled name
-                name_str = idc.get_strlit_contents(td_ea + 0x10)
-                if name_str and name_str.startswith(b".?AV"):
-                    demangled = idc.demangle_name(name_str.decode('utf-8', errors='ignore'), 0)
-                    class_name = demangled if demangled else name_str.decode('utf-8', errors='ignore')
-                    
-                    # Label the Complete Object Locator
-                    col_name = f"RTTI_COL_{class_name}"
-                    ida_name.set_name(ea, col_name, ida_name.SN_NOWARN)
+def ptr(field):                      # x64: RVA, x86: VA
+    return field if x64 else field - base
 
-                    # Look for references to this Complete Object Locator (points to vtable slot -1)
-                    for xref in idautils.XrefsTo(ea):
-                        vtable_slot_minus1 = xref.frm
-                        vtable_start = vtable_slot_minus1 + 0x08
-                        vt_name = f"vftable_{class_name}"
-                        ida_name.set_name(vtable_start, vt_name, ida_name.SN_NOWARN)
-                        print(f"[+] Labeled Vtable at 0x{vtable_start:X} for {class_name}")
+def td_name(td_rva):
+    b = rd(td_rva + (0x10 if x64 else 8), 256) or b""
+    return b.split(b"\0", 1)[0].decode("latin-1")
 
-        ea += 0x04
+cols = {}
+for va, d in secs:
+    for off in range(0, len(d) - 0x18, 4):
+        sig, offset, cdoff, td, chd = struct.unpack_from("<IIIII", d, off)
+        if sig != (1 if x64 else 0):
+            continue
+        rva = va + off
+        if x64 and struct.unpack_from("<I", d, off + 0x14)[0] != rva:
+            continue                  # pSelf must point back at the COL
+        if not x64 and not (base <= td < base + 0x7fffffff and base <= chd < base + 0x7fffffff):
+            continue
+        name = td_name(ptr(td))
+        if not name.startswith(".?A"):
+            continue
+        attrs, nbases, bca = u32(ptr(chd) + 4), u32(ptr(chd) + 8), u32(ptr(chd) + 12)
+        if attrs is None or nbases is None or nbases > 512:
+            continue
+        bases = []
+        for i in range(nbases):
+            bcd = ptr(u32(ptr(bca) + 4 * i))
+            mdisp = struct.unpack("<i", rd(bcd + 8, 4))[0]
+            bases.append(f"{td_name(ptr(u32(bcd)))}@{mdisp:+#x}")
+        cols[base + rva] = (name, offset, attrs, bases)
 
-# Run in IDA Pro
-image_base = ida_nalt.get_image_base()
-parse_msvc_rtti(image_base)
+psz, fmt = (8, "<Q") if x64 else (4, "<I")
+for va, d in secs:
+    for off in range(0, len(d) - psz, psz):
+        p = struct.unpack_from(fmt, d, off)[0]
+        if p in cols:
+            name, offset, attrs, bases = cols[p]
+            print(f"vftable 0x{base + va + off + psz:x} {name} vptr_offset={offset:#x} "
+                  f"chd_attrs={attrs:#x} bases={' '.join(bases[1:]) or '-'}")
 ```
+Demangle a reported name with `llvm-undname '??_R0<name>@8'`, for example `llvm-undname '??_R0?AUD@ns@@@8'` → `struct ns::D 'RTTI Type Descriptor'`.
+
+### Label MSVC Vtables In IDA (`ida-mcp` `execute_python`)
+IDA 9 usually names vftables itself when RTTI is intact. Use this when it did not, or after an unpack.
+```python
+import ida_bytes, ida_ida, ida_nalt, ida_name, ida_segment, idautils
+
+base = ida_nalt.get_imagebase()
+is64 = ida_ida.inf_is_64bit()
+named = 0
+for n in range(ida_segment.get_segm_qty()):
+    seg = ida_segment.getnseg(n)
+    if seg.perm & ida_segment.SEGPERM_EXEC:
+        continue
+    for ea in range(seg.start_ea, seg.end_ea - 0x18, 4):
+        if ida_bytes.get_dword(ea) != (1 if is64 else 0):
+            continue
+        if is64 and base + ida_bytes.get_dword(ea + 0x14) != ea:
+            continue
+        td = ida_bytes.get_dword(ea + 0x0C) + (base if is64 else 0)
+        raw = ida_bytes.get_strlit_contents(td + (0x10 if is64 else 8), -1, ida_nalt.STRTYPE_C)
+        if not raw or not raw.startswith(b".?A"):
+            continue
+        cls = raw.decode("latin-1")[4:].rstrip("@")
+        ida_name.set_name(ea, f"COL_{cls}_{ida_bytes.get_dword(ea + 4):x}", ida_name.SN_NOWARN | ida_name.SN_NOCHECK)
+        for x in idautils.DataRefsTo(ea):
+            vt = x + (8 if is64 else 4)
+            ida_name.set_name(vt, f"vftable_{cls}_{ida_bytes.get_dword(ea + 4):x}", ida_name.SN_NOWARN | ida_name.SN_NOCHECK)
+            named += 1
+print("vftables named:", named)
+```
+The suffix is the COL `offset`, so each vftable of a multiply-inherited class gets a distinct name. Ghidra users can run the bundled `RecoverClassesFromRTTIScript.java` (MSVC and GCC RTTI).
 
 ---
 
-## 5.1 Recovering An Unknown Struct
+## 8. Recovering An Unknown Struct
 Do not invent field types. Collect every access to the same pointer from the function, its callers, and its callees.
 
 - A displacement names an offset and a width (`byte`, `dword`, `qword`).
-- `malloc(N)`, `alloca(N)`, or a stack slot of size `N` is a size observation, not a guess.
-- A field passed to `strlen` or printed as `%s` is a string pointer. A field that is called is a function pointer. A field used with `++` is a counter. Offset 0 holding a table of code pointers is a vtable. `next` and `prev` at stable offsets are a list node.
+- `malloc(N)`, `operator new(N)`, `alloca(N)`, or a stack slot of size `N` is a size observation, not a guess.
+- A field passed to `strlen` or printed as `%s` is a string pointer. A field that is called is a function pointer. A field used with `++` or `lock xadd` is a counter or refcount. Offset 0 holding a vtable address is a vptr. `next` and `prev` at stable offsets are a list node.
+- Three adjacent pointers where the code computes `(p1 - p0) / k` is a `vector` of `k`-byte elements.
 - The struct size is the highest offset plus that field's width, rounded up only when a later access or allocation proves the padding.
 - Mark every field `proposed` until the access is in the disassembly. One function's decompiler view is not enough when a caller writes an offset the callee never reads.
 
-## 6. Boundaries & Anti-Patterns
-- **Do not mix calling conventions between MSVC and System V**: In MSVC x64, `RDI` and `RSI` are non-volatile registers preserved by the callee; in System V AMD64, `RDI` and `RSI` are volatile parameter registers. Treating `RDI` as an argument register on Windows leads to flawed function signatures.
-- **Do not assume vtable slot 0 is the start of the object allocation**: When multiple inheritance is involved, secondary vtables occur at non-zero offsets within the object layout. Always check the Complete Object Locator's `offset` field or Itanium's `offset_to_top` to locate the true base address.
-- **Do not read `std::string` buffers without checking capacity**: Slicing the first 8 bytes of a `std::string` as a pointer will cause memory dereference errors if small string optimization is active (`capacity < 16`). Always check `_Myres` / capacity field first.
-- **Beware of virtual base classes (Diamond Inheritance)**: MSVC uses virtual base tables (`vbtable`) with displacement offsets stored at `[this + offset]`, while Itanium incorporates negative virtual base offsets into the primary vtable. Never treat virtual base pointers as simple virtual method pointers.
+## 9. Verify
+- A recovered vtable: the COL `offset` (MSVC) or `offset_to_top` (Itanium) matches the thunk delta and the constructor's store offset.
+- A recovered class size: matches the `operator new` argument at an allocation site.
+- An STL layout guess: the code that reads `size()` or tests SSO uses the offsets you assumed.
+- A calling convention: callee-saved registers pushed in the prologue match the platform (`RDI`/`RSI` saved means Microsoft x64).
+
+## 10. Boundaries And Anti-Patterns
+- Do not mix conventions. On Microsoft x64 `RDI`/`RSI` are callee-saved, not arguments.
+- Do not assume vptr at offset 0 means the object start. Secondary vptrs sit inside the object. Check `offset` / `offset_to_top`.
+- Do not read a `std::string` as a pointer without the SSO test for that library.
+- Do not apply release STL layouts to an MSVC debug build.
+- Do not treat MSVC vbptr/vbtable entries or Itanium vbase offsets as function slots.
+- Do not dereference an Apple arm64 typeinfo name pointer without masking bit 63.

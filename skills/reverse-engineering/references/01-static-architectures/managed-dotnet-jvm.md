@@ -45,10 +45,16 @@ Engage this reference when analyzing managed executables or virtual-machine byte
   - `dnlib` / `AsmResolver`: High-performance low-level .NET metadata and CIL manipulation libraries for custom static devirtualization and cleaning pipelines.
   - `jadx` / `jadx-gui`: DEX to Java source decompiler with built-in deobfuscation engine, AST analysis, and custom script plugins.
     ```bash
-    # Decompile APK with deobfuscator engine enabled, setting min identifier length
-    jadx -d ./jadx_out --deobf --deobf-min 3 --deobf-parse-kotlin-metadata Target.apk
-    # Export renaming mapping file to preserve analysis state
-    jadx -d ./jadx_out --deobf --deobf-rewrite-cfg Target.apk
+    # Decompile APK with deobfuscation engine enabled, setting min identifier length.
+    # (jadx 1.5.x: --deobf, --deobf-min, --deobf-max are real; there is NO
+    #  --deobf-parse-kotlin-metadata flag. Kotlin renaming is on by default and
+    #  tuned via the kotlin-metadata.* plugin options.)
+    jadx -d ./jadx_out --deobf --deobf-min 3 Target.apk
+    # Persist the auto-generated name map so manual corrections survive re-runs.
+    # (The flag is --deobf-cfg-file [+ --deobf-cfg-file-mode], NOT --deobf-rewrite-cfg.)
+    jadx -d ./jadx_out --deobf --deobf-cfg-file names.jobf --deobf-cfg-file-mode overwrite Target.apk
+    # Apply an official ProGuard mapping when available:
+    jadx -d ./jadx_out --mappings-path mapping.txt Target.apk
     ```
   - `apktool`: Decodes Android XML resources, manifest, and disassembles DEX to Smali text.
     ```bash
@@ -169,7 +175,7 @@ ProGuard and R8 strip debugging attributes (LocalVariableTable, LineNumberTable)
   Obfuscated classes frequently retain debug log strings (`Log.d("AuthManager", "Token expired")`) or analytics tracking events (`FirebaseAnalytics.logEvent("checkout_completed")`). Cross-referencing string constants directly yields semantic class names (`AuthManager`, `CheckoutController`).
 
 #### 2. Dynamic String Decryption Automation (Frida & Dalvik Hooks)
-Obfuscators obscure C2 endpoints, API keys, and sensitive class names behind decryption routines utilizing XOR bit-shifts, AES-CBC, or multi-stage array manipulations.
+Obfuscators obscure remote endpoints, API keys, and sensitive class names behind decryption routines utilizing XOR bit-shifts, AES-CBC, or multi-stage array manipulations.
 - **Static Triage**: Locate static initialization blocks (`<clinit>`) or static utility functions receiving integer IDs or byte arrays and returning `java.lang.String`.
 - **Dynamic Interception Strategy**: Rather than re-implementing custom crypto routines in Python, hook the target decryption method inside the live Android runtime via Frida. Capture inputs and outputs to build a global translation map.
 
@@ -203,8 +209,9 @@ Control-flow flattening breaks basic blocks into cases within an infinite loop c
 #### 5. JADX Deobfuscator Engine & JEB AST Scripting
 - **JADX CLI Engine**:
   - `--deobf`: Activates JADX's internal renaming engine, creating unique deterministic names across packages.
-  - `--deobf-min`: Sets minimal length threshold for identifiers to be considered obfuscated (e.g., `--deobf-min 3`).
-  - `--deobf-rewrite-cfg`: Generates and persists the renaming map into a `jobf` project file, allowing manual corrections to survive re-decompilation runs.
+  - `--deobf-min` / `--deobf-max`: length thresholds for which identifiers count as obfuscated (default min 3, max 64).
+  - `--deobf-cfg-file <file>` with `--deobf-cfg-file-mode {read,overwrite,ignore}`: persists the auto-generated name map into a `.jobf` file so manual corrections survive re-decompilation (there is no `--deobf-rewrite-cfg` flag).
+  - `--mappings-path <file>` with `--mappings-mode`: loads an external mapping (ProGuard `mapping.txt`, Tiny/Enigma, etc.) instead of auto-naming.
 - **JEB Decompiler AST Transformations**:
   JEB allows programmatic AST visitors via Python plugins to traverse `CIntermediateTree` elements, identifying reflection wrappers and replacing AST call nodes with synthetic direct calls during decompilation passes.
 
@@ -304,6 +311,50 @@ Native implementation follows two binding mechanisms:
 
 ---
 
+### 4.6 .NET Deployment Models: ReadyToRun, NativeAOT, Single-File
+Before choosing a decompiler, classify how the assembly was published. The wrong model wastes a pass.
+
+| Model | Recognition | What decompiles it |
+|---|---|---|
+| Plain IL assembly | `BSJB` metadata, `IMAGE_COR20_HEADER`, `MethodDef` RVAs point to CIL | `ilspycmd`, `dnSpyEx`, `AsmResolver`/`dnlib` |
+| ReadyToRun (R2R / crossgen) | Still has CIL metadata, but `IMAGE_COR20_HEADER` has `COMIMAGE_FLAGS_IL_LIBRARY`; an `RTR0` ("R2R\0") magic header sits in the R2R section; methods have precompiled native code *alongside* IL | Decompile the IL normally (`ilspycmd`); the native code is a cache. Ignore it unless the IL was stripped. |
+| NativeAOT | **No** ECMA-335 metadata, **no** `BSJB`, no `mscoree`/`_CorExeMain` import; it is a plain native PE/ELF/Mach-O. Telltale strings: `S_P_CoreLib`, `__modules`, `RhpNewFast`, reflection blobs | Native tools only — route to [native-cpp-abi.md](native-cpp-abi.md). `ilspycmd`/`dnSpy` fail. |
+| Single-file bundle | A native host `.exe`/ELF with assemblies appended; bundle marker `0x8eb5…` signature and a bundle manifest at the end of file | Extract first (below), then decompile the embedded assemblies as plain IL. |
+| Mono/Unity | `mono-2.0`/`mscorlib` from Mono; Unity games use `Assembly-CSharp.dll` or IL2CPP | IL path for Mono assemblies; IL2CPP is [unity-il2cpp.md](unity-il2cpp.md). |
+
+**Single-file bundle extraction**: .NET 5+ single-file apps staple the managed assemblies onto a native host. List and extract without running the host. The ILSpy GUI shows a "bundle" node and can save the embedded assemblies; standalone extractors (`ExtractSingleFile`, `dotnet-bundle-extract`) carve them from the appended bundle. Then run `ilspycmd -p -o ./out Extracted.dll` on each recovered assembly. Verify counts against the bundle manifest (it lists how many assemblies were bundled).
+
+**Obfuscator identification** (run `de4dot -d Target.exe` first; it names the obfuscator). Map name to tool:
+
+| Obfuscator | Marker | Best unpacker |
+|---|---|---|
+| ConfuserEx / ConfuserEx2 | `ConfusedByAttribute`, mangled `<Module>` cctor, control-flow + proxy calls | `de4dot-cex` (fork) or community ConfuserEx unpackers; `NETReactorSlayer` does not apply |
+| .NET Reactor | `()` ctor stubs, encrypted resource, native stub | `NETReactorSlayer` (maintained), then `de4dot -p nr` |
+| Eazfuscator.NET | VM + homoglyph names, `<PrivateImplementationDetails>` | `de4dot -p ef` (older builds); newer builds need manual devirtualization |
+| SmartAssembly | `{SmartAssembly...}` strings, strings-encoding | `de4dot -p sa` |
+| Babel.NET | `BabelAttribute` | `de4dot -p bb` |
+| KoiVM / virtualization | `KoiVM`/`Koi` runtime, VM dispatcher resource | `OldRod` (KoiVM devirtualizer), then `de4dot` cleanup |
+
+`dnSpyEx` is the maintained fork of the abandoned `dnSpy`; prefer it for interactive IL editing and the managed debugger.
+
+### 4.7 JVM: Class File, `javap`, and Decompiler Choice
+A `.class` file starts with `0xCAFEBABE`, a 2-byte minor and 2-byte major version (major 52 = Java 8, 55 = Java 11, 61 = Java 17, 65 = Java 21), then the constant pool. Use the JDK's `javap` for ground truth when a decompiler output looks wrong:
+```bash
+javap -p -c -v -constants Target.class    # private members, bytecode, pool, flags
+```
+Decompiler choice (JVM `.class`/`.jar`, distinct from the DEX path):
+
+| Decompiler | Strength |
+|---|---|
+| **Vineflower** (Fernflower fork) | Best default for modern Java and Kotlin; active |
+| **CFR** | Strongest on modern control flow, lambdas, `switch` expressions, records |
+| **Procyon** | Good on older/enum/annotation-heavy code; slower |
+| **jadx** | DEX/APK (Dalvik), not plain `.class`; also reads `.jar` |
+
+Run two and diff when a method looks suspect; decompilers disagree on generated control flow.
+
+**Kotlin metadata**: Kotlin classes carry a `@kotlin.Metadata` annotation whose `d1`/`d2` arrays encode original names, nullability, and declaration structure in protobuf. jadx reads it to restore Kotlin-level names; `kotlinx-metadata-jvm` parses it programmatically. Do not treat a Kotlin class as plain Java — property getters/setters, `companion` objects, and coroutine state machines come from this metadata.
+
 ## 5. Concrete Code & Script Examples
 
 ### 5.1 Automated Frida Script for Android String Decryption Mapping
@@ -343,9 +394,17 @@ Java.perform(function () {
         return plainText;
     };
 
-    // Overload variant for byte-array based decrypters: String decrypt(byte[] data)
-    if (Decrypter[targetMethod].overload("[B")) {
-        Decrypter[targetMethod].overload("[B").implementation = function (cipherBytes) {
+    // Overload variant for byte-array based decrypters: String decrypt(byte[] data).
+    // .overload() THROWS if the overload is absent, so guard with try/catch
+    // (do not use it as a truthy check).
+    let byteArrayOverload = null;
+    try {
+        byteArrayOverload = Decrypter[targetMethod].overload("[B");
+    } catch (e) {
+        byteArrayOverload = null;
+    }
+    if (byteArrayOverload) {
+        byteArrayOverload.implementation = function (cipherBytes) {
             const plainText = this[targetMethod](cipherBytes);
             
             // Convert byte array to hex representation for mapping key

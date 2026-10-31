@@ -1,220 +1,245 @@
-# Apple Firmware & iOS Reverse Engineering Reference (`ipsw` & `vphone-cli`)
+# Apple Firmware with `ipsw` (blacktop/ipsw)
 
-## 1. Title & Overview
-- **Domain**: Apple iOS and macOS firmware analysis, Mach-O binary triage, kernelcache decryption, dyld shared cache extraction, and rooted Apple Silicon research virtual machines using `blacktop/ipsw` and `vphone-cli`.
-- **Scope**: Firmware acquisition via official CDN portals (`ipsw.me`) and CLI automation (`ipsw download`), kernelcache unpacking and symbol recovery, dyld shared cache dissection, Mach-O and entitlement extraction, and local rooted virtual iPhone execution on macOS via Apple's Virtualization.framework and Private Cloud Compute (PCC) research guests.
-
----
-
-## 2. Trigger Conditions & Detection Indicators
-Engage this reference when:
-- Analyzing Apple iOS, iPadOS, or macOS system components, private frameworks, or system daemons (`launchd`, `commcenter`, `amfid`).
-- Inspecting encrypted or LZSS/LZFSE-compressed Apple kernelcaches (`kernelcache.release.*`).
-- Extracting individual dylibs and private frameworks from the monolithic Apple `dyld_shared_cache`.
-- Triaging Mach-O binary structures, dynamic loader load commands (`LC_LOAD_DYLIB`, `LC_CODE_SIGNATURE`), embedded provisioning profiles, or entitlements (`__TEXT,__entitlements`).
-- Bootstrapping a fully rooted iOS research guest VM on Apple Silicon macOS to conduct live dynamic analysis without a physical hardware jailbreak.
+- **Domain**: Apple iOS, iPadOS, and macOS firmware: IPSW/OTA acquisition, kernelcache extraction and analysis, dyld shared cache (DSC) symbol lookup and dylib extraction, Mach-O metadata, Objective-C/Swift headers, entitlements, and version diffing.
+- **Scope**: end-to-end pipelines, verified subcommands and flags, IDA/Ghidra hand-off, pitfalls.
+- **Verified**: run against `ipsw` 3.1.740 on macOS 27 (arm64): `download ipsw --urls/--kernel`, `info`, `extract --kernel --device`, `kernel version/kexts/extract/syscall/cpp/mig`, `dyld info/symaddr/a2s/extract`, `macho info --ent --arch`, `class-dump --headers`, `swift-dump --demangle`. `diff`, `extract --dyld` on a full iOS IPSW, `symbolicate`, and `kernel symbolicate` were checked against `--help` only.
+- **Related**: iOS app-level work is in [../01-static-architectures/mobile-ios.md](../01-static-architectures/mobile-ios.md). The rooted virtual iPhone (`vphone-cli`) is in [../05-environment/host-and-lab-setup.md](../05-environment/host-and-lab-setup.md) section 5.
 
 ---
 
-## 3. Tooling & CLI Actions
+## 1. Install and orient
 
-### Primary Tool Suite
-- **`blacktop/ipsw` CLI**: Specialized Swiss-army knife for Apple firmware, available via Homebrew:
-  ```bash
-  brew install blacktop/tap/ipsw
-  ```
-- **Firmware Portals**:
-  - `https://ipsw.me/`: Direct browser portal cataloging official signed and unsigned Apple CDN firmware links.
-  - `ipsw download`: Automated programmatic acquisition from Apple CDN.
-- **Rooted iOS Research Hypervisor**:
-  - `vphone-cli`: Manages Apple Silicon PCC research guest virtual machines utilizing macOS `Virtualization.framework`.
+```bash
+brew install blacktop/tap/ipsw
+ipsw version
+ipsw <command> --help          # flags change between releases; check before scripting
+```
+
+| Artifact | Where it lives | `ipsw` entry point |
+|---|---|---|
+| Kernelcache (IM4P, LZFSE/LZSS, Mach-O FILESET inside) | IPSW zip root (`kernelcache.release.<board>`) | `extract --kernel`, `download ipsw --kernel` |
+| dyld shared cache | iOS 16+/macOS 13+: in a Cryptex DMG inside the IPSW; macOS host: `/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e` (+ `.01`… subcaches) | `extract --dyld`, `dyld …` |
+| Root filesystem (daemons, plists) | `fs`/`sys` DMG (AEA-encrypted on recent builds) | `extract --files --pattern`, `mount fs` |
+| DeviceTree, iBoot, SEP, SPTM/TXM | IM4P files in the IPSW | `extract --dtree/--iboot/--sep/--sptm`, `dtree`, `img4 im4p extract` |
+
+Decision table:
+
+| Goal | Fastest route |
+|---|---|
+| Kernel of the newest build for one device | `ipsw download ipsw --device <id> --latest --kernel` (remote partial extract, no full download) |
+| Kernel or DSC from an IPSW you already have | `ipsw extract --kernel/--dyld --device <id> <ipsw>` |
+| One framework for IDA/Ghidra | `ipsw dyld extract <DSC> <dylib path> --objc --stubs -o <dir>` |
+| Address in a crash/panic | `ipsw dyld a2s` (userland), `ipsw kernel symbolicate --lookup` (kernel), `ipsw symbolicate <.ips>` |
+| What changed between two builds | `ipsw diff old.ipsw new.ipsw --markdown -o <dir>` |
+| Who holds an entitlement | `ipsw ent --sqlite ents.db --ipsw <ipsw>` then `--key` / `--value` |
 
 ---
 
-## 4. Firmware Acquisition & Triage
+## 2. Acquire firmware
 
-### Acquiring IPSW Firmware
 ```bash
-# Query latest available iOS release for a specific device identifier
-ipsw download ipsw --device iPhone16,1 --latest
-
-# Download specific build version directly from Apple CDN
-ipsw download ipsw --device iPhone15,2 --build 21E236
-
-# Direct fetch of remote metadata without downloading the full 6GB+ image
-ipsw download ipsw --device iPhone16,1 --latest --urls
+ipsw download ipsw --show-latest-version --device iPhone17,1        # 27.2
+ipsw download ipsw --show-latest-build --device iPhone17,1          # 24B119
+ipsw download ipsw --device iPhone17,1 --latest --urls              # print CDN URL only
+ipsw download ipsw --device iPhone17,1 --build 24B119 -o ~/fw -y    # full IPSW
+ipsw download ipsw --device iPhone17,1 --latest --kernel -o ~/fw -y # kernelcache only (remote zip ranges)
+ipsw download ipsw --device iPhone17,1 --latest --dyld -a arm64e -o ~/fw -y   # DSC only
+ipsw download appledb --os iOS --version '26.1' --device iPhone17,1 --kernel  # betas and older builds
+ipsw download ota --help                                              # OTAs (AEA keys needed for newer ones)
+ipsw download kdk --help                                              # Kernel Debug Kits (symbols for macOS kernels)
 ```
 
-### Inspecting Firmware Contents
-An IPSW file is a zip archive containing:
-- Restorable disk images (Root filesystem DMG, Recovery DMG).
-- `kernelcache.release.*`: The compressed iOS kernel and prelinked kernel extensions (kexts).
-- `BuildManifest.plist` & `Restore.plist`: Target device models, build tags, and component digests.
+Remote `--kernel` extraction fetched a 27.2 kernelcache in about 15 s. Outputs land in `<out>/<build>__<device>/`.
 
 ---
 
-## 5. Kernelcache Decryption & Kext Extraction
+## 3. Inspect an IPSW
 
-iOS kernelcaches are packed into IMG4 containers (`IM4P`), often compressed with LZFSE or LZSS, and historically encrypted on older devices.
-
-### Decompressing and Decrypting Kernelcache
 ```bash
-# Decompress and unwrap kernelcache from IMG4 container
-ipsw kernel dec kernelcache.release.iPhone16,1 -o ./unpacked_kernel
-
-# Extract all prelinked Kernel Extensions (kexts) into a structured folder
-ipsw kernel extract kernelcache.release.iPhone16,1 --kexts -o ./extracted_kexts/
-
-# Diff two kernelcaches to identify security fixes between iOS point releases
-ipsw kernel diff kernelcache_21E219.dec kernelcache_21E236.dec
+ipsw info iPhone17,1_27.2_24B119_Restore.ipsw          # version, build, DMGs, per-device kernelcache names
+ipsw info --list UniversalMac_27.0.1_26A434_Restore.ipsw | grep kernelcache
+ipsw info --json <ipsw> > info.json
+ipsw extract --sys-ver <ipsw>                          # SystemVersion.plist
 ```
 
-### Analyzing Kernel Symbol Tables
-Modern kernelcaches omit full symbol tables; `ipsw` parses the GOT, C++ virtual method tables (OSObject vtables), and exported Mach-O structures to recover symbols:
-```bash
-# Dump all recovered kernel symbols and addresses
-ipsw kernel syms ./unpacked_kernel/kernelcache.release.iPhone16,1.dec > kernel_syms.txt
+Universal macOS IPSWs carry many kernelcaches and several SystemOS DMGs. Pass `--device <product type or board>` (for example `--device VirtualMac2,1` or `--device Mac16,1`) to pick one.
 
-# Inspect Mach-O load commands and sections of the unpacked kernel
-ipsw macho info ./unpacked_kernel/kernelcache.release.iPhone16,1.dec
+---
+
+## 4. Kernelcache pipeline
+
+```bash
+IPSW=UniversalMac_27.0.1_26A434_Restore.ipsw
+ipsw extract --kernel --device VirtualMac2,1 -o kc "$IPSW"
+K=kc/26A434__VirtualMac2,1/kernelcache.release.VirtualMac2,1
+file "$K"                                  # Mach-O 64-bit arm64e: already decompressed
+ipsw kernel version "$K"                   # Darwin version + xnu build tag
+ipsw kernel kexts "$K" | head              # bundle ids (--json for machine output)
+ipsw kernel extract "$K" com.apple.driver.AppleMobileFileIntegrity -o kexts
+ipsw kernel extract "$K" --all -o kexts    # every kext as a standalone Mach-O
+ipsw macho info "$K" --loads | head        # FILESET load commands
+```
+
+`extract --kernel` already unwraps IM4P and decompresses. Use `ipsw kernel dec <im4p> -o <out>` only for a raw `kernelcache.release.*` pulled from the zip by hand.
+
+Recover structure from a stripped kernel:
+
+| Command | Output |
+|---|---|
+| `ipsw kernel syscall "$K"` | BSD syscall table: number, handler address, prototype |
+| `ipsw kernel mig "$K"` | MIG subsystems and `_X…` routine addresses |
+| `ipsw kernel mach "$K"` | Mach trap table |
+| `ipsw kernel cpp "$K" [-c Class] [-i] [--json]` | IOKit C++ classes: size, parent, metaclass, vtable address |
+| `ipsw kernel symbolsets "$K"` | Exported symbol sets per kext |
+| `ipsw kernel symbolicate "$K" --signatures <sigs> --json` | Symbol map from signature files (blacktop/symbolicator); `--lookup 0xfffffe…` for one address |
+| `ipsw kernel ctfdump` / `ipsw kernel dwarf` | Types from CTF or a KDK DWARF kernel |
+
+Feed these into IDA: name syscall handlers and MIG routines from the tables, then set vtables from `kernel cpp` output. IDA 9.x loads FILESET kernelcaches natively (choose the full fileset or single kexts at load time). `ipsw kernel ida` (marked WIP) automates IDA loading; prefer IDA's loader plus scripted naming ([ida-pro.md](ida-pro.md) section 7).
+
+---
+
+## 5. dyld shared cache
+
+```bash
+DSC=/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e   # macOS host
+ipsw extract --dyld -a arm64e -o dsc <ipsw>                 # from an IPSW (iOS: arm64e)
+ipsw dyld info "$DSC"                                       # header, platform, subcaches, image count
+ipsw dyld info --dylibs "$DSC" | grep -i security
+```
+
+Pass the main cache file (no `.01` suffix). `ipsw` finds the subcaches next to it.
+
+### 5.1 Symbols and addresses
+
+```bash
+ipsw dyld symaddr "$DSC" _SecItemCopyMatching --image Security    # 0x1845c0c70 ... Security
+ipsw dyld a2s "$DSC" 0x1845c0c70 --image                          # address -> symbol + image/section
+ipsw dyld a2s "$DSC" 0x1845c0c70 --slide 0x1a2c000                # crash address with runtime slide
+ipsw dyld a2f "$DSC" 0x1845c0c70                                  # containing function
+ipsw dyld str "$DSC" "com.apple.private.security"                 # fast byte search for a string
+ipsw dyld disass "$DSC" --symbol _SecItemCopyMatching --symbol-image Security
+ipsw dyld imports "$DSC" Security                                 # which images load this dylib
+ipsw dyld objc --help                                             # ObjC optimization tables
+```
+
+Addresses printed by `symaddr`/`a2s` are unslid cache addresses. Subtract the runtime slide from crash addresses or pass `--slide`.
+
+### 5.2 Extract a framework for IDA/Ghidra
+
+```bash
+ipsw dyld extract "$DSC" /System/Library/Frameworks/Security.framework/Versions/A/Security \
+  -o out --objc --stubs        # --objc adds ObjC metadata to the symtab and implies --slide
+ipsw dyld extract "$DSC" --all -o out_all                       # every image (slow, large)
+ipsw dyld split "$DSC" -o split_dir                             # Xcode dsc_extractor, macOS only
+```
+
+Use the full install path of the image (`/System/Library/Frameworks/X.framework/Versions/A/X` on macOS, `/System/Library/Frameworks/X.framework/X` on iOS). Extracted dylibs still reference other cache images by address. For cross-image calls, load the whole DSC in IDA (it has a native DSC loader that adds modules on demand) instead of a single extracted dylib.
+
+---
+
+## 6. Mach-O metadata, headers, entitlements
+
+```bash
+ipsw macho info /usr/libexec/amfid --arch arm64e --ent         # entitlements plist
+ipsw macho info <macho> --loads --sig                          # load commands + code signature
+ipsw macho info <macho> --objc --swift --demangle              # ObjC/Swift metadata
+ipsw macho info <macho> --starts --json > starts.json          # function starts for an untagged disassembler
+ipsw macho info <macho> --fixups                               # chained fixups
+ipsw macho info <kernelcache> --fileset-entry com.apple.kernel --extract-fileset-entry --output kern
+```
+
+`macho info` takes one Mach-O, `.app`, or `.ipa`, not a directory. Loop in the shell for many files. Universal binaries need `--arch` when stdout is not a terminal (agents always hit this).
+
+Headers:
+
+```bash
+ipsw class-dump "$DSC" /System/Library/Frameworks/Security.framework/Versions/A/Security --headers -o hdr
+ipsw class-dump <macho> --class 'NSXPC.*' --re                 # one class regex, with addresses
+ipsw class-dump <new_DSC> <dylib> --diff <old_DSC>              # ObjC API delta between builds
+ipsw swift-dump "$DSC" /System/Library/Frameworks/CryptoKit.framework/Versions/A/CryptoKit --demangle
+ipsw swift-dump <macho> --type 'Foo.*' --demangle
+```
+
+Entitlement database across a whole firmware:
+
+```bash
+ipsw ent --sqlite ents.db --ipsw iPhone17,1_27.2_24B119_Restore.ipsw
+ipsw ent --sqlite ents.db --key com.apple.private.security.no-sandbox
+ipsw ent --sqlite ents.db --value LockdownMode
+ipsw ent --sqlite ents.db --file WebContent
+```
+
+Device tree and other firmware:
+
+```bash
+ipsw dtree <ipsw> --summary          # parse DeviceTree straight from the IPSW
+ipsw extract --dtree -o dt <ipsw>
+ipsw img4 im4p extract --output payload.bin <file.im4p>
+ipsw mount fs <ipsw>                 # read-only mount of the filesystem DMG (macOS)
+ipsw extract --files --pattern '.*LaunchDaemons.*\.plist$' -o fs <ipsw>
 ```
 
 ---
 
-## 6. Dyld Shared Cache (DSC) Extraction & Splitting
+## 7. Crash and panic symbolication
 
-To optimize memory mapping, Apple links all system dynamic libraries and private frameworks into a monolithic `dyld_shared_cache` (located at `/System/Library/Caches/com.apple.dyld/`).
-
-### Extracting DSC from IPSW
 ```bash
-# Extract the dyld_shared_cache directly from the IPSW filesystem DMG
-ipsw extract --dyld iPhone16,1_17.4_21E236_Restore.ipsw -o ./dsc_extracted/
+ipsw symbolicate panic-full-2026-10-01-120000.000.ips iPhone17,1_27.2_24B119_Restore.ipsw
+ipsw symbolicate <crash.ips>                     # falls back to Xcode DeviceSupport DSC (userland only)
+ipsw symbolicate <panic.ips> <ipsw> --peek       # disassembly around panic frames
 ```
 
-### Splitting Dylibs from Shared Cache
-To reverse engineer a single private framework (e.g. `SpringBoardServices`, `Security`, `WebKit`) in IDA Pro or Ghidra, split it out of the cache:
-```bash
-# Split entire dyld shared cache into individual Mach-O dylib files
-ipsw dyld split ./dsc_extracted/dyld_shared_cache_arm64e ./split_dylibs/
-
-# Extract a specific single dylib without splitting the entire multi-gigabyte cache
-ipsw dyld extract ./dsc_extracted/dyld_shared_cache_arm64e /System/Library/Frameworks/Security.framework/Security -o ./Security.dylib
-```
+Kernel frames need the IPSW (or a symbol server). Userland frames need the DSC of the exact build.
 
 ---
 
-## 7. Mach-O Inspection, Entitlements & Device Tree
+## 8. Diff two builds (patch analysis)
 
-### 1. Entitlements Extraction
-Apple security relies heavily on sandboxing and entitlement verification. Inspect entitlements embedded in Mach-O binaries:
 ```bash
-# Extract raw XML/plist entitlements from Mach-O code signature
-ipsw macho info target_daemon --ent
-
-# Extract entitlements across an entire directory of system binaries
-ipsw macho info /path/to/binaries/ --ent --json > system_entitlements.json
+ipsw diff old.ipsw new.ipsw --device iPhone17,1 --markdown -o diff_27.1_27.2
+ipsw diff old.ipsw new.ipsw --ent --launchd --fw --strs --starts --markdown -o diff_full
+ipsw diff old.ipsw new.ipsw --kdk <old KDK kernel> --kdk <new KDK kernel> -o diff_kdk   # macOS with KDKs
+ipsw kernel kexts --diff old_kc new_kc              # kext version delta only
+ipsw dyld info --dylibs --diff old_DSC new_DSC      # image version delta only
 ```
 
-### 2. Device Tree Parsing
-The DeviceTree contains hardware peripherals, memory mappings, and board-level specifications:
-```bash
-# Parse and decode DeviceTree file from IPSW
-ipsw devicetree DeviceTree.d83.im4p
-```
-
-### 3. Class-Dump Objective-C / Swift Headers
-Generate clean Objective-C interfaces and Swift declarations directly from Mach-O binaries or dyld caches:
-```bash
-# Extract Objective-C class declarations from a Mach-O framework
-ipsw class-dump ./Security.dylib --output ./Security_Headers/
-```
+Read the Markdown report for changed kexts and dylibs, then pull both versions of each changed binary (`kernel extract` / `dyld extract`) and diff them in BinDiff or Diaphora ([../03-objectives/vuln-research-patch.md](../03-objectives/vuln-research-patch.md)). `--strs` (cstring changes) and `--starts` (function count changes) point at patched functions fast. Diff results are cached under `~/Library/Caches/ipsw/diffs`; `--clean` resets a pair.
 
 ---
 
-## 8. Rooted iOS Research Virtual Machine (`vphone-cli`)
+## 9. End-to-end: patched kext between two iOS builds
 
-On macOS running on Apple Silicon (M1/M2/M3/M4), `vphone-cli` provisions a fully bootable, rooted virtual iPhone environment using Apple's `Virtualization.framework` and Private Cloud Compute (PCC) research VM infrastructure.
-
-```
-+-------------------------------------------------------------------------------+
-| macOS Host (Apple Silicon - macOS 15+)                                         |
-|                                                                               |
-|  1. csrutil allow-research-guests enable (NVRAM security configuration)       |
-|  2. sudo VPhoneEscalator allow /usr/local/bin/vphone-vm                       |
-|                                                                               |
-|  +-------------------------------------------------------------------------+  |
-|  | vphone-vm (Apple Virtualization.framework PCC Guest)                    |  |
-|  |                                                                         |  |
-|  |   +-----------------------------------------------------------------+   |  |
-|  |   | Rooted iOS Virtual iPhone Guest (iOS 26 / Custom Firmware)      |   |  |
-|  |   | - Jailbreak Patchset (JB=1 / make fw_patch_jb - 112 patches)    |   |  |
-|  |   | - Complete Root Access (uid=0)                                  |   |  |
-|  |   | - SSH Server (Port 2222)                                        |   |  |
-|  |   | - Sileo Package Manager & TrollStore                            |   |  |
-|  |   | - frida-server (Dynamic Binary Instrumentation)                 |   |  |
-|  |   +-----------------------------------------------------------------+   |  |
-|  +-------------------------------------------------------------------------+  |
-+-------------------------------------------------------------------------------+
+```bash
+D=iPhone17,1
+ipsw download ipsw --device $D --build 24A335 --kernel -o fw -y
+ipsw download ipsw --device $D --build 24B119 --kernel -o fw -y
+OLD=fw/24A335__$D/kernelcache.release.$D; NEW=fw/24B119__$D/kernelcache.release.$D
+ipsw kernel kexts --diff "$OLD" "$NEW"
+for k in "$OLD" "$NEW"; do ipsw kernel extract "$k" com.apple.driver.AppleMobileFileIntegrity -o "$(dirname "$k")/kexts"; done
+ipsw kernel syscall "$NEW" > syscalls_new.txt
+# load both extracted kexts in IDA, export, BinDiff
 ```
 
-### Host Prerequisites & Authorization
-1. **Enable Research Guests in macOS NVRAM** (Run in macOS Recovery):
-   ```bash
-   csrutil allow-research-guests enable
-   ```
-2. **Authorize Escalator Helper**:
-   `vphone-cli` requires an escalator helper daemon to acquire hypervisor privileges without disabling System Integrity Protection (SIP):
-   ```bash
-   sudo VPhoneEscalator allow /path/to/vphone-cli/build/vphone-vm
-   ```
-3. **Verify Host Readiness**:
-   ```bash
-   vphone-cli host preflight
-   # Output must indicate: [OK] vphone-vm can launch
-   ```
-
-### Provisioning the Rooted Virtual iPhone
-1. **Prepare Firmware & Custom Jailbreak Patch Set**:
-   The jailbreak patch set (`JB=1` / `make fw_patch_jb`) applies 112 patches to provide full root execution, disable signature enforcement on guest userland, and install core research tools:
-   ```bash
-   # Prepare firmware using cached IPSW images
-   vphone-cli fw prepare iOS-Research-VM \
-     --iphone-source /path/to/.ipsw-cache/iPhone_Restore.ipsw \
-     --cloudos-source /path/to/.ipsw-cache/CloudOS_Restore.ipsw
-
-   # Apply jailbreak patches
-   vphone-cli fw patch iOS-Research-VM
-   ```
-
-2. **Install Custom Firmware (CFW) with Elevated Privileges**:
-   ```bash
-   sudo vphone-cli cfw install iOS-Research-VM --library-root "$HOME/.vphone/machines"
-   ```
-
-3. **Boot VM & Connect to Root Environment**:
-   ```bash
-   # Launch the rooted iOS Research VM
-   vphone-cli vm start iOS-Research-VM
-
-   # Connect via SSH into root shell
-   ssh -p 2222 root@localhost
-   # Default password: alpine
-   ```
-
-4. **Dynamic Instrumentation inside Research Guest**:
-   - The research guest includes Sileo and TrollStore.
-   - Stage and run `frida-server` on the guest:
-     ```bash
-     ssh -p 2222 root@localhost "/usr/bin/frida-server -D"
-     ```
-   - Connect from host:
-     ```bash
-     frida-ps -H 127.0.0.1:27042 -ai
-     ```
+Build numbers above are examples. Get real ones with `--show-latest-build` or `ipsw download appledb --os iOS --device $D --json`.
 
 ---
 
-## 9. Boundaries & Anti-Patterns
-- **Do not mix up iOS Simulator binaries and native iOS device binaries**: Simulator builds run in macOS userland (`x86_64` or `arm64-apple-darwin`), while device firmware runs under strict iOS sandbox profiles and `arm64e` pointer authentication (PAC).
-- **Do not attempt to decrypt modern kernelcaches without checking IMG4 tags**: A9+ kernelcaches are unencrypted but compressed with LZFSE; attempting to supply AES keys to an unencrypted container will fail. Use `ipsw kernel dec` directly.
-- **Do not run `vphone-cli cfw install` without root privileges**: Modifying APFS volume layouts and container disks for research guests requires `sudo`.
+## 10. Pitfalls
+
+- **Universal binaries in non-TTY.** `macho info` fails with `pass --arch (arm64e, arm64e_x1)`. Always pass `--arch`.
+- **Wrong kernelcache in universal macOS IPSWs.** Without `--device`, you may get every board's kernel or the wrong one. Match the board to the target Mac or to `VirtualMac2,1` for VMs.
+- **AEA-encrypted DMGs.** Recent `fs`/`sys` DMGs end in `.dmg.aea`. `ipsw` fetches keys when available; otherwise supply `--pem-db` or `--key-db`. Kernelcache extraction does not need them.
+- **Decrypting modern kernelcaches.** A9+ kernelcaches are not encrypted, only compressed. Do not look for AES keys.
+- **arm64e PAC.** Device code is arm64e. Pointers in data carry PAC bits; IDA/Ghidra strip them when the loader knows the format. Simulator builds are x86_64/arm64 macOS code and say nothing about device behavior.
+- **Unslid vs slid addresses.** DSC and kernelcache tools print unslid addresses. Crash logs and live memory are slid.
+- **Extracted dylib is not self-contained.** Calls into other cache images resolve to stubs. Use `--stubs`, or load the full DSC.
+- **Version drift.** Commands marked 🚧 in `--help` (`swift-dump --interface`, `kernel ida`, `dyld xref`) are work in progress. Verify output before relying on it.
+
+---
+
+## 11. Verification checklist
+
+- `file` on extracted kernelcache/dylib reports `Mach-O 64-bit arm64e` (not `data`).
+- `ipsw kernel version` matches the build you meant to analyze.
+- A known exported symbol resolves both ways: `dyld symaddr` gives an address, `dyld a2s` on it returns the same name.
+- Diff reports name the same build pair you downloaded (check the report header).

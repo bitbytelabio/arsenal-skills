@@ -1,10 +1,170 @@
-# Frida Mobile Dynamic Instrumentation and TLS Unpinning
+# Frida Tool Usage, Mobile Setup, and TLS Unpinning
 
 ## Purpose
 
-Use this reference for authorized runtime analysis of Android and iOS applications with Frida. It covers device readiness, transport setup, framework-specific certificate pinning, and evidence that a bypass reached the intended trust boundary. Installing a proxy CA and bypassing pinning are separate operations: the CA makes the proxy certificate a trust anchor, while the hooks neutralize application-enforced pins.
+Use this reference to drive Frida itself: versions, the CLI tools, the Python API, compiled agents, Gadget, the mobile pre-flight gate, and TLS unpinning on Android and iOS. Hooking methodology (what to hook, Interceptor vs Stalker, CModule, memory scans, detection vectors) is in [`frida-hooking.md`](../02-dynamic-instrumentation/frida-hooking.md). Installing a proxy CA and bypassing pinning are separate operations: the CA makes the proxy certificate a trust anchor, while the hooks neutralize application-enforced pins.
 
-Read [`network-traffic-proxy.md`](../02-dynamic-instrumentation/network-traffic-proxy.md) for proxy routing and capture, and [`flutter-dart.md`](../01-static-architectures/flutter-dart.md) for Flutter's statically linked BoringSSL path.
+Read [`network-traffic-proxy.md`](../02-dynamic-instrumentation/network-traffic-proxy.md) for proxy routing and capture, and [`flutter-dart.md`](../01-static-architectures/flutter-dart.md) for Flutter's statically linked BoringSSL path. Untrusted samples are instrumented only inside the lab from [`malware-sandbox-isolation.md`](../02-dynamic-instrumentation/malware-sandbox-isolation.md).
+
+## Versions and the Frida 17 Break
+
+The client (`frida-tools` + the `frida` Python package) and the injected side (`frida-server` or Gadget) must share a major version. Check both before debugging a hook:
+
+```bash
+frida --version
+uv run --with "frida==17.*" python -c "import frida; print(frida.__version__)"
+frida-ps -U >/dev/null && echo "server reachable"
+```
+
+Frida 17 removed the static `Module.*ExportByName` forms, `Module.findBaseAddress`, and the `Memory.readXxx`/`Memory.writeXxx` statics. It also stopped putting `Java`, `ObjC`, and `Swift` into every script. The migration table and verified replacements are in [`frida-hooking.md`](../02-dynamic-instrumentation/frida-hooking.md#frida-17-api-baseline). Where each bridge is available:
+
+| How the script is loaded | `Java` / `ObjC` / `Swift` globals |
+|---|---|
+| `frida ... -l script.js` (REPL, including `-q`) | Present. The REPL bundles the bridges. |
+| `frida-trace` handlers | Present. |
+| Python/Node `session.create_script(source)` | Absent. Verified: `typeof ObjC === 'undefined'`. |
+| Agent built with `frida-compile` | Present only if imported: `import ObjC from "frida-objc-bridge"`. |
+
+## CLI Reference
+
+| Task | Command |
+|---|---|
+| List devices | `frida-ls-devices` |
+| Processes / apps on USB device | `frida-ps -U`, `frida-ps -Uai` (apps, installed, with identifiers), `-j` for JSON |
+| Processes on a remote server | `frida-ps -H 192.168.64.5:27042` |
+| Spawn, load, resume | `frida -U -f "$PACKAGE_ID" -l agent.js` (spawned programs resume after load; add `--pause` to keep the main thread paused, then `%resume`) |
+| Spawn a local program | `frida -f "$PWD/sample" -l agent.js -- arg1` (an absolute path avoids "unable to find application") |
+| Attach by name / PID / identifier | `-n NAME`, `-p PID`, `-N com.example.app`, `-F` (frontmost app) |
+| Wait for a process to appear | `frida -U -W com.example.app -l agent.js` |
+| Non-interactive run with a bound | `frida -U -n NAME -l agent.js -q -t 30` (quiet, exit after 30 s; `-t inf` runs until killed) |
+| Write output to a file | `-o session.log` |
+| Fail fast in automation | `--exit-on-error`, `--kill-on-exit` |
+| Pass parameters to a script | `-P '{"rva": "0x1a450"}'`, read as the global `parameters` |
+| Load a C module | `-C hooks.c` |
+| Choose the JS runtime | `--runtime=v8` (better JIT for heavy scripts) or `--runtime=qjs` (default) |
+| Emulated realm (Android x86 emulators with ARM libraries) | `--realm=emulated` |
+| Kill / file transfer | `frida-kill -U PID`, `frida-pull`, `frida-push`, `frida-ls`, `frida-rm` |
+
+Every automated `frida` invocation needs `-q -t SECONDS` or an outer `timeout`. Without them a non-interactive run waits forever at the REPL.
+
+### frida-trace
+
+```bash
+frida-trace -U -f "$PACKAGE_ID" -i 'libssl.so!SSL_write' -i 'libssl.so!SSL_read' -o trace.log
+frida-trace -p "$PID" -i 'open*' -x 'openat64' -I libtarget.so -a 'libtarget.so!0x1a450'
+frida-trace -U -N com.example.app -m '-[NSURLSession dataTask*]' -j '*!*certificate*/isu'
+```
+
+| Flag | Meaning |
+|---|---|
+| `-i MOD!FUNC` / `-x MOD!FUNC` | Include / exclude functions by glob (`MOD!` optional) |
+| `-I MOD` / `-X MOD` | Include / exclude all exports of a module |
+| `-a MOD!OFFSET` | Hook an unexported function by RVA; the handler is named `sub_<offset>` |
+| `-T` / `-t MOD` | Include the program's imports / one module's imports |
+| `-m` / `-M` | Include / exclude ObjC methods (`-[Class sel*]`) |
+| `-y` / `-Y` | Include / exclude Swift functions |
+| `-j` / `-J` | Include / exclude Java methods (`Class!method`, suffix `/i` case-insensitive, `/s` include signatures, `/u` user classes only) |
+| `-s SYMBOL` | Include a debug symbol |
+| `-S init.js` | Run a JS file first, for shared helpers |
+| `-P JSON` | Parameters exposed as `parameters` |
+| `-d` | Prefix log lines with the module name |
+| `-o FILE` | Write messages to a file |
+
+Handlers are generated under `./__handlers__/<module>/<function>.js` and reused on the next run. Frida 17 handlers use `defineHandler({ onEnter(log, args, state) {...}, onLeave(log, retval, state) {...} })`. Edit the handler to decode arguments. Delete it to regenerate. Verified on 17.17: `-i`, `-a`, and import tracing generated handlers and logged calls with timestamps and thread IDs.
+
+`frida-itrace` records instruction-level traces of a range. `frida-strace` traces syscalls on Linux and Android. Both are slower than `frida-trace`; scope them narrowly.
+
+## Python API
+
+Use the Python API when the session needs logic: collecting binary messages, RPC calls, spawn gating, or several processes. Verified against Frida 17.25 Python bindings and a 17.17 Gadget:
+
+```python
+# drive.py — uv run --with "frida==17.*" python drive.py "$PACKAGE_ID" agent.js spawn
+#            uv run --with "frida==17.*" python drive.py "$PROCESS_NAME" agent.js attach
+import sys, time, frida
+
+target, agent_path, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+device = frida.get_usb_device(timeout=5)          # or frida.get_device_manager().add_remote_device("HOST:PORT")
+pid = device.spawn([target]) if mode == "spawn" else None
+session = device.attach(pid if pid is not None else target)
+session.on("detached", lambda reason, crash: print(f"[detached] {reason} {crash}"))
+
+script = session.create_script(open(agent_path).read())
+records = []
+def on_message(message, data):
+    if message["type"] == "send":
+        records.append((message["payload"], data))
+    else:
+        print(message.get("stack", message))
+script.on("message", on_message)
+script.load()
+if pid is not None:
+    device.resume(pid)
+
+time.sleep(10)                                    # bounded observation window
+print(f"[drive] {len(records)} messages")
+print(script.exports_sync.counter() if "counter" in script.list_exports_sync() else "")
+script.unload()
+session.detach()
+```
+
+- `device.spawn(program, argv=None, envp=None, env=None, cwd=None, stdio=None)` returns a PID in the suspended state. Always `device.resume(pid)`.
+- `script.exports_sync.name(...)` calls `rpc.exports.name`. `script.list_exports_sync()` lists them.
+- `message["type"] == "error"` carries `description`, `stack`, `fileName`, `lineNumber`.
+- Spawn gating (`device.enable_spawn_gating()`, `spawn-added`) and child gating (`session.enable_child_gating()`, `child-added`) are in [`frida-hooking.md`](../02-dynamic-instrumentation/frida-hooking.md#early-instrumentation).
+- `session.compile_script(source)` returns bytecode for faster repeated loads (`create_script_from_bytes`).
+
+## Compiled Agents and Bridges
+
+Agents with npm dependencies (bridges, `frida-il2cpp-bridge`, TypeScript) are compiled into one bundle. Verified: an agent importing `frida-objc-bridge` and `frida-java-bridge` compiled with `frida-compile` and reported `ObjC.available === true` on macOS.
+
+```bash
+AGENT_DIR="$PWD/agent"            # your own scratch directory, never the sample's
+mkdir -p "$AGENT_DIR" && cd "$AGENT_DIR"
+npm init -y >/dev/null
+npm install frida-java-bridge frida-objc-bridge @types/frida-gum
+cat > agent.ts <<'EOF'
+import Java from "frida-java-bridge";
+import ObjC from "frida-objc-bridge";
+console.log(`Java=${Java.available} ObjC=${ObjC.available}`);
+EOF
+frida-compile agent.ts -o _agent.js -S      # frida-tools ships frida-compile; -S omits source maps
+frida -U -f "$PACKAGE_ID" -l _agent.js -q -t 20
+```
+
+`frida-create -t agent` scaffolds the same layout. Unity IL2CPP targets use `frida-il2cpp-bridge`; see [`unity-il2cpp.md`](../01-static-architectures/unity-il2cpp.md).
+
+## Frida Gadget
+
+Gadget is the Frida runtime as a shared library loaded by the target itself. Use it when no `frida-server` can run (non-rooted Android, non-jailbroken iOS, sandboxed processes) or when the injector is detected.
+
+Gadget reads a JSON config named after its own file: `libfrida-gadget.so` → `libfrida-gadget.config.so` on Android (the `.so` suffix makes the package installer extract it), `frida-gadget.dylib` → `frida-gadget.config` elsewhere.
+
+| `interaction.type` | Behavior | Use |
+|---|---|---|
+| `listen` (default, `127.0.0.1:27042`) | Waits for a client; `on_load: "wait"` blocks the app until attach, `"resume"` does not | Interactive work: `frida -H 127.0.0.1:27042 -n Gadget -l agent.js` |
+| `connect` | Connects out to a `frida-portal` | Many devices, one controller |
+| `script` | Runs a local JS file, no client needed | Unattended capture, CI, devices without a network path |
+| `script-directory` | Runs scripts matching a filter per process | System-wide on rooted images |
+
+```json
+{ "interaction": { "type": "script", "path": "/data/local/tmp/agent.js", "on_change": "ignore" } }
+```
+
+Packaging:
+- Android: `frida-apk -g libfrida-gadget.so -c on_load=wait app.apk -o app.gadget.apk` marks the app debuggable and adds the gadget with a `wrap.sh` (`LD_PRELOAD`). The output is unsigned: `zipalign -p 4` then `apksigner sign --ks lab.keystore`. Alternatives: add a `System.loadLibrary("frida-gadget")` to smali, or add a `DT_NEEDED` entry to an existing native library with LIEF.
+- iOS: insert a load command for `@executable_path/Frameworks/FridaGadget.dylib` (`insert_dylib`, LIEF, or Sideloadly/objection patching), then re-sign the whole bundle with your identity. Signature changes break apps that verify their own team ID or entitlements.
+- macOS / Linux test harness: `DYLD_INSERT_LIBRARIES` / `LD_PRELOAD` on a binary you own. Hardened-runtime and SIP-protected binaries ignore `DYLD_INSERT_LIBRARIES`.
+
+Gadget is how this reference's snippets were tested on a macOS host with Developer Mode disabled. `frida -f` and `frida -p` need `task_for_pid`; Gadget in `script` or `listen` mode does not. The test binary was the agent's own C program, never a sample:
+
+```bash
+GADGET="$PWD/frida-gadget.dylib"        # from the frida release matching `frida --version`
+printf '{"interaction":{"type":"script","path":"%s","on_change":"ignore"}}' "$PWD/agent.js" > "$PWD/frida-gadget.config"
+timeout 20 env DYLD_INSERT_LIBRARIES="$GADGET" ./own_test_program
+```
+
+Put `timeout` outside `env`. Otherwise the gadget also loads into `timeout` itself.
 
 ## Mandatory Mobile Pre-Flight Environment Gate
 
@@ -93,25 +253,36 @@ For a `vphone-cli` guest, transfer the same CA profile to the guest, install it,
 
 ## Frida Transport and Version Matching
 
-The host tools and injected server must use the same Frida major version and a server binary matching the target ABI.
+The server binary must match the client's major version and the device ABI (`arm64-v8a` → `android-arm64`, `x86_64` → `android-x86_64`).
 
 ```bash
-frida --version
-adb shell getprop ro.product.cpu.abi
+FRIDA_VERSION="$(frida --version)"
+ABI="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+case "$ABI" in
+  arm64-v8a) FRIDA_ARCH=arm64 ;; armeabi-v7a) FRIDA_ARCH=arm ;;
+  x86_64) FRIDA_ARCH=x86_64 ;; x86) FRIDA_ARCH=x86 ;; *) echo "unknown ABI $ABI"; exit 1 ;;
+esac
+curl -fL -o frida-server.xz \
+  "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-server-${FRIDA_VERSION}-android-${FRIDA_ARCH}.xz"
+xz -d -f frida-server.xz
 adb push frida-server /data/local/tmp/frida-server
 adb shell "su -c 'chmod 755 /data/local/tmp/frida-server'"
-adb shell "su -c '/data/local/tmp/frida-server -D &'"
+adb shell "su -c '/data/local/tmp/frida-server -D'"          # -D daemonizes; no trailing &
 frida-ps -Uai
 ```
 
-Use USB/device mode for Android and physical iOS devices, and host mode for the default `vphone-cli` forwarding:
+To move off the default port (a common detection vector), start the server with `-l 127.0.0.1:41337`, run `adb forward tcp:41337 tcp:41337`, and use `-H 127.0.0.1:41337` instead of `-U`.
+
+Use USB/device mode for Android and physical iOS devices, and host mode for the default `vphone-cli` forwarding. Derive the package identifier from the artifact under analysis, never from "the first third-party package" on the device:
 
 ```bash
-frida -U -f "$(adb shell pm list packages -3 | sed -n '1s/^package://p' | tr -d '\r')" -l ssl_unpin_android.js
-frida -H 127.0.0.1:27042 -f com.apple.mobilesafari -l ssl_unpin_ios.js
+PACKAGE_ID="$(apkanalyzer manifest application-id target.apk)"   # or: aapt2 dump packagename target.apk
+test -n "$PACKAGE_ID"
+adb shell pm path "$PACKAGE_ID"                                   # confirm it is installed
+frida -U -f "$PACKAGE_ID" -l ssl_unpin_android.js
+BUNDLE_ID=com.apple.mobilesafari                                  # replace with the target's CFBundleIdentifier
+frida -H 127.0.0.1:27042 -f "$BUNDLE_ID" -l ssl_unpin_ios.js
 ```
-
-For a specific application, derive and inspect its package identifier before spawning it rather than copying an identifier from another target.
 
 ## TLS Trust Boundaries
 
@@ -350,10 +521,12 @@ Launch early enough to intercept builder configuration:
 ```bash
 PACKAGE_ID="$(apkanalyzer manifest application-id target.apk)"
 test -n "$PACKAGE_ID"
-frida -U -f "$PACKAGE_ID" -l ssl_unpin_android.js
+frida -U -f "$PACKAGE_ID" -l ssl_unpin_android.js -o unpin.log
 ```
 
-If the application uses a non-default class loader, enumerate class loaders and set `Java.classFactory.loader` to the loader that resolves `okhttp3.CertificatePinner` before installing the OkHttp hooks.
+The script uses the `Java` global, so load it through the `frida` CLI or `frida-trace -S`. From Python or a compiled agent, add `import Java from "frida-java-bridge";` at the top and build it with `frida-compile`.
+
+If the application uses a non-default class loader, enumerate loaders with `Java.enumerateClassLoadersSync()`, pick the one where `loader.findClass('okhttp3.CertificatePinner')` does not throw, and assign it to `Java.classFactory.loader` before installing the OkHttp hooks.
 
 ## iOS SSL/TLS Unpinning Script
 
@@ -553,9 +726,12 @@ Alamofire 5's actual API is `ServerTrustEvaluating.evaluate(_:forHost:)`; `evalu
 Run against the research guest:
 
 ```bash
+BUNDLE_ID=com.apple.mobilesafari      # replace with the target's CFBundleIdentifier
 frida-ps -H 127.0.0.1:27042 -ai
-frida -H 127.0.0.1:27042 -f com.apple.mobilesafari -l ssl_unpin_ios.js
+frida -H 127.0.0.1:27042 -f "$BUNDLE_ID" -l ssl_unpin_ios.js -o unpin.log
 ```
+
+The script uses the `ObjC` global (CLI only, or import `frida-objc-bridge` in a compiled agent). Loaded on macOS through Gadget, it installed the Security.framework hooks and both `NSURLSession` challenge selectors without errors; the TLS bypass effect itself still needs the device and proxy evidence below.
 
 ## Flutter BoringSSL
 

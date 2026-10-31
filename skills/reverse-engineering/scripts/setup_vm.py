@@ -593,8 +593,8 @@ def cmd_defender(args: argparse.Namespace) -> int:
 
     extra_vars = {
         "defender_action": action,
-        "clear_exclusions": args.clear_exclusions,
-        "custom_exclusions": exclusions,
+        "defender_clear_exclusions": args.clear_exclusions,
+        "defender_exclusions": exclusions,
     }
 
     cmd: list[str] = [

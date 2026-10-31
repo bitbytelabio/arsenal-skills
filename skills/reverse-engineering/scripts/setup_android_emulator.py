@@ -909,7 +909,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_create.add_argument("--device", default=DEFAULT_DEVICE, help="Hardware device definition")
     p_create.add_argument(
-        "--force", action="store_true", default=True, help="Overwrite existing AVD"
+        "--force", action="store_true", help="Overwrite an existing AVD with the same name"
     )
 
     # patch-kernel

@@ -508,18 +508,16 @@ def cmd_ida_server_info(json_mode: bool) -> int:
     docker_examples = {
         "command_template": (
             "docker run --rm -it "
-            "--ipc=host "
-            "--pid=host "
+            "--cap-drop=ALL "
             "--cap-add=SYS_PTRACE "
             "--security-opt seccomp=unconfined "
-            "-p 23946:23946 "
+            "-p 127.0.0.1:23946:23946 "
             "-v $(pwd):/workspace "
             "<image> /workspace/linux_server -p23946"
         ),
         "flags_explanation": {
-            "-p 23946:23946": "Forwards default IDA Pro remote debug server port to host",
-            "--ipc=host": "Shares host IPC namespace allowing cross-process synchronization and debug hooks",
-            "--pid=host": "Shares host PID namespace allowing debugger to attach to host / sibling container processes",
+            "-p 127.0.0.1:23946:23946": "Publishes the IDA debug server port on host loopback only",
+            "--cap-drop=ALL": "Drops every capability except the ptrace one added back below",
             "--cap-add=SYS_PTRACE": "Permits ptrace(2) system calls necessary for breakpoints and memory read/write",
             "--security-opt seccomp=unconfined": "Disables seccomp filter restrictions on tracing syscalls",
         },
@@ -573,10 +571,10 @@ def cmd_ida_server_info(json_mode: bool) -> int:
             print(f"  {flag:<30} {desc}")
 
         print("\n--- UTM VM Remote Debugging Setup ---")
-        print("1. Shared Network (NAT) Port Forwarding:")
+        print("1. Emulated VLAN with a port forward (Shared Network has no port forwarding):")
         print("   - Host Port: 23946 -> Guest Port: 23946")
         print("   - Connect IDA Pro to: 127.0.0.1:23946")
-        print("2. Bridged Network:")
+        print("2. Shared, Host Only, or Bridged Network:")
         print("   - Query Guest IP: utmctl ip-address <vm>")
         print("   - Connect IDA Pro to: <guest_ip>:23946")
         print("3. Guest Command Examples:")

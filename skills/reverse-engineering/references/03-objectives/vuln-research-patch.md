@@ -18,18 +18,29 @@ When to open this reference:
 ## Tooling & CLI/MCP Actions
 
 ### Primary Binary Diffing Engines
-- **BinDiff (Google)**:
-  - Industry-standard graph-based diffing tool.
-  - Generates `.BinExport` databases from IDA Pro or Ghidra and executes isomorphism and heuristic graph matching.
-  - Command: `bindiff --primary=<unpatched.BinExport> --secondary=<patched.BinExport> --output_dir=<diff_out>`.
-- **Ghidra BSim**:
-  - Feature vector and semantic LSH (Locality Sensitive Hashing) matching engine built into Ghidra.
-  - Matches functions across large corpora without requiring full 1:1 binary alignment.
-- **Diaphora**:
-  - Open-source pure-Python diffing engine for IDA Pro; provides deep AST-level and decompiled C-code diffing.
-- **Radare2 `radiff2`**:
-  - Rapid CLI-based binary delta, graph diffing, and opcode distance comparison.
-  - Commands: `radiff2 -c file1 file2` (count differences), `radiff2 -g main file1 file2` (CFG diff).
+- **BinDiff (Google)** — industry-standard graph-based diffing. Needs `.BinExport` files from a disassembler.
+  - BinExport 12 supports **IDA Pro 9.4+** (the 8.x series is discontinued) and ships a Ghidra extension.
+  - CLI (both forms work; `--primary`/`--secondary`/`--output_dir` are verified in the python-bindiff wrapper, and positional `bindiff a.BinExport b.BinExport` writes `a_vs_b.BinDiff` to the cwd):
+    ```bash
+    bindiff --primary=unpatched.BinExport --secondary=patched.BinExport --output_dir=./diff/
+    ```
+  - **IDA headless export** (options must precede files): run IDA with
+    `-OBinExportAutoAction:BinExportBinary -OBinExportModule:out.BinExport`, or an IDC that calls
+    `load_and_run_plugin("binexport12_ida", 2)` (mode 2 = binary export). The output is named after the open database with `.BinExport` appended.
+  - **Ghidra headless export**:
+    ```bash
+    analyzeHeadless <proj_dir> <proj> -process target.bin \
+      -preScript BinExport.java out.BinExport -noanalysis
+    ```
+- **ghidriff** — scriptable Ghidra-based diff producing Markdown + JSON, no GUI. Engines: `VersionTrackingDiff` (default), `StructualGraphDiff`, `SimpleDiff`.
+  ```bash
+  export GHIDRA_INSTALL_DIR=/path/to/ghidra
+  uv tool install ghidriff
+  ghidriff --engine VersionTrackingDiff -o .ghidriffs old.bin new.bin
+  ```
+- **Ghidra BSim** — feature-vector / LSH matching across large corpora without 1:1 alignment.
+- **Diaphora** — open-source IDA diffing engine with decompiled-C and AST-level diffs.
+- **Radare2 `radiff2`** — CLI delta and graph diffing. Useful flags (verified on r2 6.2.4): `-AC` (analyze both, then code graph-diff listing `off-A | MATCH (ratio) | off-B`), `-A -g <sym>` (CFG diff of one function), `-s`/`-ss` (edit distance), `-t <0-100>` (similarity threshold).
 
 ---
 
@@ -124,41 +135,68 @@ Porting symbols from an analyzed or debug build into a stripped production binar
    - Apply Markup Items (Function Names, Signatures, Parameter Names, Local Variables).
 3. **Migrate outward from a reliable anchor, one function at a time.** Exports first, then unchanged strings, then rare constants. A renamed callee becomes the next anchor. Do not submit a whole binary to a matcher or a model in one pass. Spot-check a sample of renames against the anchor's call before trusting the batch. A wrong anchor poisons every name derived from it. This is symbol migration. A security conclusion still has to pass section 4.
 
+### 6. Acquiring The Two Builds
+
+Diffing is only as good as the baseline. Reconstruct the real pre- and post-patch files.
+
+#### Windows (monthly cumulative updates)
+Windows updates ship differentials, not whole PEs. Reconstruct the full binary before diffing:
+1. Get the `.msu` for the target KB from the Microsoft Update Catalog.
+2. Expand the nested packages with the built-in `expand` tool:
+   ```cmd
+   expand -F:* update.msu C:\extracted
+   cd C:\extracted
+   expand -F:* *.cab C:\extracted\cab
+   ```
+   Newer cumulative updates nest further CABs and a `.psf` payload; expand each layer.
+3. The payload holds **forward** (`f/`) and **reverse** (`r/`) delta patches, not full PEs. Apply them against a same-version baseline (an older copy from `C:\Windows\WinSxS`) with a delta-apply helper built on `ApplyDeltaB` (`msdelta.dll`):
+   ```cmd
+   python delta_patch.py -i baseline\ntfs.sys -o ntfs_patched.sys r\ntfs.sys f\ntfs.sys
+   ```
+   The reverse delta rebuilds the pre-patch binary from any newer baseline; the forward delta rebuilds the post-patch binary. Diffing a raw delta, or a baseline of a different build, produces garbage.
+4. When you lack a local baseline, pull the exact prior version from **winbindex** (indexes every shipped Windows binary by timestamp + image size, served from `msdl.microsoft.com`), then apply the reverse delta on top of it.
+
+#### Linux (distro packages)
+1. Fetch the vulnerable and fixed source/binary packages (`apt-get source pkg=ver`, `dnf download --source`, or the distro's security archive).
+2. For binary diffs, extract the ELF from each `.deb`/`.rpm` (`dpkg-deb -x`, `rpm2cpio | cpio -idmv`) and diff the matching `.so`/executable. Match compiler flags and the debug-split (`-dbgsym`/`-debuginfo`) package to recover symbols for the baseline.
+3. The upstream VCS commit referenced by the CVE is the ground truth; use the binary diff to locate it in the shipped build.
+
+#### Firmware (version-to-version)
+1. Extract both firmware images with `binwalk -e` or `unblob` into separate clean directories.
+2. Diff the matching extracted binary (same path inside the filesystem), not the whole image. A version bump changes timestamps and build paths everywhere; isolate the one changed service or driver first.
+
 ---
 
-## Concrete Script Example: Automated radiff2 Delta Screening
+## Concrete Script Example: radiff2 Delta Screening
 
 ```python
-#!/usr/bin/env python3
-"""
-radiff_triage.py - Quick CLI triage of function changes between two binaries.
-"""
-import subprocess
-import json
-import sys
+# uv run python -I radiff_triage.py <unpatched_bin> <patched_bin>
+import subprocess, sys
 
-def triage_diff(bin_old, bin_new):
-    print(f"[*] Comparing {bin_old} and {bin_new}...")
-    
-    # Run radiff2 in JSON mode
-    cmd = ["radiff2", "-c", bin_old, bin_new]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    print(f"[*] Byte delta count: {res.stdout.strip()}")
+def triage(old, new):
+    # Byte-level change count.
+    n = subprocess.run(["radiff2", "-n", old, new], capture_output=True, text=True)
+    print(f"[*] byte delta: {n.stdout.strip()}")
 
-    # Compare functions
-    cmd_funcs = ["radiff2", "-C", bin_old, bin_new]
-    res_funcs = subprocess.run(cmd_funcs, capture_output=True, text=True)
-    
-    print("\n[*] Changed Functions Summary:")
-    for line in res_funcs.stdout.splitlines():
-        if "UNMATCH" in line or "DIFF" in line:
-            print(f"  {line}")
+    # Function graph diff: lines are "name sizeA offA | MATCH (ratio) | offB sizeB name".
+    # Analyze both (-A) then code-diff (-C); -q drops color. Sort by similarity just below 1.0.
+    r = subprocess.run(["radiff2", "-AC", "-q", old, new],
+                       capture_output=True, text=True)
+    changed = []
+    for line in r.stdout.splitlines():
+        if "MATCH" not in line and "UNMATCH" not in line and "NEW" not in line:
+            continue
+        if "(1.000000)" in line:          # identical functions: skip
+            continue
+        changed.append(line.strip())
+    print(f"[*] {len(changed)} changed/added/removed functions (similarity < 1.0):")
+    for line in changed[:50]:
+        print("  " + line)
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <unpatched_bin> <patched_bin>")
-        sys.exit(1)
-    triage_diff(sys.argv[1], sys.argv[2])
+        sys.exit(f"Usage: {sys.argv[0]} <unpatched_bin> <patched_bin>")
+    triage(sys.argv[1], sys.argv[2])
 ```
 
 ---

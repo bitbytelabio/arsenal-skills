@@ -48,24 +48,26 @@ Engage this reference when analyzing compiled Apple ecosystem executables:
   ldid -e <binary>
   ```
 - **Objective-C & Swift Metadata Dumpers**:
-  - `class-dump`: Extracts Objective-C interfaces and header declarations (`.h`).
+  - `ipsw class-dump`: the maintained dumper. Handles Objective-C and Swift, works on single Mach-O, fat binaries (`--arch arm64`), and dyld shared cache images. Prefer it over the legacy `class-dump` (unmaintained, Objective-C only, chokes on modern Swift and arm64e). `ipsw` is a single Go binary (`brew install blacktop/tap/ipsw`); see [ipsw.md](../04-tool-usage/ipsw.md).
     ```bash
-    class-dump -H -o ./headers <decrypted_binary>
+    ipsw class-dump --headers --output ./headers <decrypted_binary>
+    ipsw class-dump --swift <decrypted_binary>         # Swift types
+    ipsw macho info <decrypted_binary>                 # header, load commands, segments
     ```
-  - `dsdump`: Advanced dumper supporting both Objective-C and Swift 5 type structures.
+  - `dsdump`: alternative dumper for Objective-C and Swift 5 type structures (not preinstalled on this host; build from source). `dsdump --objc --color <binary>` and `dsdump --swift <binary>`.
+  - `swift demangle` / `xcrun swift-demangle`: demangles Swift mangled symbols (prefix `$s` / `_$s`). There is no bare `swift-demangle` on PATH; invoke through the toolchain. Reads symbols as args or on stdin:
     ```bash
-    dsdump --swift --objc <binary>
-    ```
-  - `swift-demangle`: Standard demangler for Swift 5 symbol strings.
-    ```bash
-    swift-demangle _$s7MyClass10doSomethinyyF
+    xcrun swift-demangle '_$s4main3fooyyF'            # -> main.foo() -> ()
+    nm <binary> | awk '{print $3}' | grep '^_\$s' | xcrun swift-demangle
     ```
 - **FairPlay Decryption Utilities (On Research Device / Jailbreak)**:
-  - `frida-ios-dump`: Attaches to active iOS app and dumps decrypted IPA.
+  - `frida-ios-dump`: attaches to the running app over the Frida server, dumps decrypted pages, and repackages a decrypted IPA. The script is `dump.py` from the checkout; it needs the device reachable over USB/SSH and a running `frida-server`:
     ```bash
-    python3 dump.py com.target.bundleid
+    BUNDLE_ID="com.target.app"
+    python3 dump.py "$BUNDLE_ID"            # -> <AppName>.ipa with cryptid=0
     ```
-  - `bagbak`: Decrypts app along with all embedded app extensions (`PlugIns/`) and frameworks.
+  - `bagbak`: Node tool that decrypts the main binary plus embedded app extensions (`PlugIns/`) and frameworks in one pass (`npx bagbak "$BUNDLE_ID"`). Prefer it when extensions matter.
+  - `flexdecrypt` / `ipadump`-style on-device decryptors: run on the jailbroken guest and overwrite the slice with `cryptid=0`. Use whichever the lab guest already provides; the goal is identical (a decrypted Mach-O), only the transport differs. Lab setup is in [host-and-lab-setup.md](../05-environment/host-and-lab-setup.md).
 
 ---
 
@@ -96,13 +98,13 @@ Mach-O Load Command: LC_ENCRYPTION_INFO_64
 Objective-C uses dynamic message passing instead of direct function calls.
 
 #### Core Runtime Structures:
+Modern (non-fragile ABI, arm64) layout. `bits` is a `class_data_bits_t`: mask it with `FAST_DATA_MASK` (`0x00007ffffffffff8`) to reach a `class_rw_t`; the clean compile-time metadata (`class_ro_t`) hangs off that, or is `bits & mask` directly before the class is realized. There is no separate `vtable` word in the modern struct — `cache` is a two-word `cache_t` (bucket pointer + mask/occupied). Account for pointer authentication (arm64e) when dereferencing these on-device.
 ```c
-struct objc_class {
-    struct objc_class* isa;         // Pointer to metaclass
-    struct objc_class* superclass;  // Pointer to parent class
-    void*              cache;       // Method cache for fast lookup
-    void*              vtable;
-    struct class_ro_t* bits;        // Read-only class metadata
+struct objc_class {          // 5 words, arm64
+    struct objc_class* isa;         // metaclass (arm64e: PAC-signed)
+    struct objc_class* superclass;
+    cache_t            cache;       // two words: _buckets + _mask/_flags
+    class_data_bits_t  bits;        // (bits & FAST_DATA_MASK) -> class_rw_t -> class_ro_t
 };
 
 struct class_ro_t {
@@ -286,6 +288,37 @@ Record, before decompiling:
 iOS `cryptid` does not apply to a locally built macOS debug binary. A Mac App Store binary can still be encrypted. Check the load command instead of assuming.
 
 A universal binary needs an explicit slice (`arm64`, `arm64e`, or `x86_64`) before import. If Mach-O reexport resolution blocks the import, import again without reexports and record that the static view omits them. A path under `/System/Library` is often a dyld-cache stub with no local Mach-O. Disassemble the extracted cache slice. Attach the debugger to the live process. A Frida hook on an unqualified native symbol that never fires is not evidence the function is absent. Retry `Module!symbol`. An XPC report with zero services is missing input until its warnings say the bundle was actually parsed.
+
+### 4.6 Load Command Reference
+The load commands you read most, and what each tells you:
+
+| Load command | Value | What it tells you |
+|---|---|---|
+| `LC_SEGMENT_64` | `0x19` | Segment/section layout (`__TEXT`, `__DATA`, `__LINKEDIT`) |
+| `LC_ENCRYPTION_INFO_64` | `0x2C` | FairPlay `cryptid`/`cryptoff`/`cryptsize` (decrypt gate) |
+| `LC_ENCRYPTION_INFO` | `0x21` | 32-bit variant (rare on modern arm64) |
+| `LC_LOAD_DYLIB` | `0x0C` | Linked dylib path (`@rpath`, framework deps) |
+| `LC_RPATH` | `0x1C` | Runtime search path for `@rpath` resolution |
+| `LC_CODE_SIGNATURE` | `0x1D` | Code signature blob; entitlements live here |
+| `LC_UUID` | `0x1B` | Build UUID (symbolication, dyld-cache matching) |
+| `LC_MAIN` | `0x80000028` | Entry point offset (`LC_MAIN` has the high bit set) |
+| `LC_VERSION_MIN_*` / `LC_BUILD_VERSION` | `0x24..0x32` | Min OS / SDK version |
+
+Dump them with `otool -l <binary>` or `ipsw macho info <binary>`. Confirm `cryptid` before any static read:
+```bash
+otool -l <binary> | grep -A4 LC_ENCRYPTION_INFO
+```
+
+### 4.7 dyld Shared Cache Extraction
+System frameworks (`UIKit`, `Foundation`, most of `/System/Library`) are not standalone Mach-O files on disk; they are merged into the dyld shared cache (`/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64*` on-device, or `/System/Volumes/Preboot/.../dyld_shared_cache_*` and the Cryptexes on recent systems). A path under `/System/Library` usually yields a stub, not analyzable code. Extract the real image first:
+```bash
+# List images inside a cache, then extract one framework as a standalone Mach-O
+ipsw dyld info dyld_shared_cache_arm64e
+ipsw dyld extract dyld_shared_cache_arm64e /System/Library/Frameworks/UIKit.framework/UIKit
+# Or split the whole cache into individual dylibs
+ipsw dyld split dyld_shared_cache_arm64e --output ./cache_out
+```
+Then disassemble the extracted slice, not the on-disk stub. For a live process, attach the debugger or Frida to the mapped image (`Module!symbol`) rather than reading the stub.
 
 ## 6. Boundaries & Anti-Patterns
 - **Do not decompile App Store binaries before memory decryption**: When `cryptid == 1`, the code section is ciphertext. Tools will misidentify function boundaries and produce useless output. Decrypt on device first.

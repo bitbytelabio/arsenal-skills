@@ -1,39 +1,61 @@
 # Binary Protocol & Network Serialization Recovery
 
 ## Title & Overview
-- **Domain**: Custom binary network protocols, serialization formats (Protocol Buffers, gRPC, MessagePack, FlatBuffers), and proprietary telemetry streams.
-- **Scope**: Reverse engineering packet framing, header fields, TLV structures, Protobuf wire format parsing without `.proto` definitions (`varint`, `length-delimited`), gRPC service reconstruction, PCAP packet stream carving, and Wireshark Lua dissector authoring.
+- **Domain**: Custom binary network protocols, serialization formats (Protocol Buffers, gRPC, FlatBuffers, Cap'n Proto, MessagePack, Thrift), and proprietary telemetry streams.
+- **Scope**: Framing and length/TLV detection, varint and checksum recognition, state machines, Protobuf wire-format parsing and descriptor recovery from binaries, recognition of other serialization formats, TLS keylog decryption, authoring Wireshark Lua dissectors and Kaitai Struct specs, and replay/fuzz confirmation.
 
 ---
 
 ## Trigger Conditions & Detection Indicators
 When to open this reference:
-- Network traffic captures or client binaries utilize non-standard binary TCP/UDP communications displayed as raw data in Wireshark.
-- String references include `.proto` file descriptors, `google.protobuf.*`, `grpc-status`, or `flatbuffers`.
-- Binary contains manual serialization loops using shifts and masks: `buf[i++] = (val >> 24) & 0xff`.
-- High-level telemetry or command-and-control protocols require reverse engineering to extract message schemas and command opcodes.
+- Captures or a client use non-standard binary TCP/UDP framing that Wireshark shows as raw data.
+- Strings include `.proto`, `google.protobuf.*`, `grpc-status`, `flatbuffers`, `capnp`, `MessagePack`, or `Thrift`.
+- The binary has manual serialization loops with shifts and masks: `buf[i++] = (val >> 24) & 0xff`, or varint loops (`while (b & 0x80)`).
+- A command or telemetry protocol needs its message schema and opcodes recovered.
 
 ---
 
-## Tooling & CLI/MCP Actions
+## Tooling & CLI Actions
 
-### Primary Decompilers & Analyzers
-- **Headless IDA Pro / Ghidra**: Disassemble and decompile packet serialization, parsing, and dispatch routines.
-- **Protobuf & gRPC Recovery**:
-  - `protoc --decode_raw`: Native Protobuf schema-free parser.
-  - `pbtk` (Protobuf Toolkit): Extracts `.proto` definitions directly from compiled binaries.
-  - `blackboxprotobuf`: Python library for decoding and editing schema-free Protobuf messages.
-- **Traffic Inspection & Dissection**:
-  - `tshark` (Wireshark CLI): Packet slicing, payload extraction, and Lua dissector testing.
-  - `mitmproxy`: Intercepting gRPC and HTTP/2 WebSocket streams.
+### Protobuf / gRPC
+- `protoc --decode_raw` — schema-free parser; reads a raw message from stdin:
+  ```bash
+  protoc --decode_raw < payload.bin
+  ```
+- `blackboxprotobuf` — Python decode/re-encode of schema-free messages (verified):
+  ```bash
+  uv run --with blackboxprotobuf python -I -c \
+    "import blackboxprotobuf,sys; m,t=blackboxprotobuf.decode_message(open('payload.bin','rb').read()); print(m)"
+  ```
+- `protodump` — extracts embedded `FileDescriptorProto` definitions to `.proto` files:
+  ```bash
+  go install github.com/arkadiyt/protodump/cmd/protodump@latest
+  protodump -file target.bin -output ./recovered_proto/
+  ```
+- `pbtk` — extracts `.proto` from binaries, JARs/APKs, and JS. Correct entry points are the console scripts, not a module path:
+  ```bash
+  uv tool install pbtk
+  pbtk-from-binary target.bin ./recovered_proto/     # native binary
+  pbtk-jar-extract app.apk ./recovered_proto/        # Java/Android (needs dex2jar, jad)
+  ```
+- `grpcurl` — if the server has reflection enabled, dump the full service schema live (lab endpoints only):
+  ```bash
+  grpcurl -plaintext localhost:50051 list
+  grpcurl -plaintext localhost:50051 describe mypkg.MyService
+  ```
+- `buf` — lint/convert recovered `.proto` and regenerate descriptors.
+
+### Capture & dissection
+- `tshark` — slice, filter, and run a Lua dissector headlessly. Wireshark ships dissectors for `protobuf`, `grpc`, `thrift`, `tls`, `http2`, `quic`, and `msgpack` (confirmed in `tshark -G protocols`).
+- `mitmdump` — intercept HTTP/2 and gRPC; decode-as needs the Protobuf dissector's search paths set.
+- Kaitai Struct — declarative binary format spec; compile with `ksc` and parse with the runtime (`uv run --with kaitaistruct python -I ...`).
+- Scapy — craft and replay frames in a lab (`uv run --with scapy python -I ...`).
 
 ---
 
-## Core Methodologies & Step-by-Step Technical Workflow
+## 1. Framing & Transport Boundary Identification
 
-### 1. Packet Framing & Transport Boundary Identification
-
-Every binary protocol must solve the framing problem: how does the receiver determine where one message ends and the next begins?
+Every binary protocol must solve framing: where does one message end and the next begin?
 
 ```text
 +-------------------+--------------------+--------------------+--------------------+
@@ -42,168 +64,202 @@ Every binary protocol must solve the framing problem: how does the receiver dete
 0                   2                    4                    8                   8+N
 ```
 
-#### Framing Categories
-1. **Fixed Header with Length Field**:
-   - Header contains fixed fields (Magic, Opcode, Sequence) followed by a 16-bit or 32-bit length integer indicating the size of the following payload.
-   - *Detection*: Compare packets of differing sizes. Look for a field whose integer value matches either `packet_size` or `packet_size - header_size`.
-   - *Endianness*: Check whether a 258-byte packet carries `0x01, 0x02` (big-endian/network order) or `0x02, 0x01` (little-endian).
-2. **Type-Length-Value (TLV) Streams**:
-   - Sequential triplets where each field declares its Type tag, Length in bytes, and Value data.
-   - Allows flexible variable-length records and nested hierarchical objects.
-3. **Delimiter-Framed Messages**:
-   - Messages separated by specific boundary tokens (e.g., `0x00`, `\r\n`, or SLIP framing `0xC0`).
+### Framing categories
+1. **Fixed header with length field**: fixed fields (magic, opcode, sequence) then a 16- or 32-bit length.
+   - *Detect*: compare packets of different sizes; find a field whose value equals `payload_size` or `payload_size - header_size`.
+   - *Endianness*: a 258-byte payload carries `01 02` (big-endian/network) or `02 01` (little-endian).
+2. **Type-Length-Value (TLV)**: `type`, `length`, `value` triplets, often nested.
+3. **Delimiter-framed**: messages split by a token (`00`, `\r\n`, SLIP `0xC0`).
+4. **Varint-length-prefixed**: a LEB128 varint length prefix (common with Protobuf-over-stream and gRPC-Web).
 
-### 2. Protocol Buffers Wire Format Parsing Without `.proto`
+### Length-field detection, mechanically
+Collect several frames, then for each candidate offset/width test whether `read_int(offset,width,endian) + k == frame_len` for a constant `k` (the header size). The width/endian/`k` that holds across all frames is the length field.
 
-Protobuf encodes structured messages as sequences of key-value pairs without transmitting field names. Each field consists of a **tag** (which combines field number and wire type) followed by the field value.
+### Varint (LEB128) recognition
+Little-endian base-128: each byte carries 7 payload bits; the high bit (`0x80`) means "more bytes follow". A loop that masks `& 0x7F`, shifts by 7, and tests `& 0x80` is a varint decoder. ZigZag (`sint32/64`) maps `n` to `(n<<1) ^ (n>>31)`.
 
-#### Wire Types
-- **Type 0 (Varint)**: `int32`, `int64`, `uint32`, `uint64`, `sint32`, `sint64`, `bool`, `enum`.
-- **Type 1 (64-bit)**: `fixed64`, `sfixed64`, `double`.
-- **Type 2 (Length-delimited)**: `string`, `bytes`, embedded messages, packed repeated fields.
-- **Type 5 (32-bit)**: `fixed32`, `sfixed32`, `float`.
+### Checksum / integrity fields
+A trailing 1–4 byte field that changes with any body change is a checksum. Try CRC-16/CRC-32 (`0xEDB88320`), Adler-32 (two 16-bit sums mod 65521), Fletcher, or a simple sum/XOR. Confirm by recomputing over the covered range.
 
-#### Tag Calculation
-The tag byte is calculated as:
-$$\text{Tag} = (\text{Field Number} \ll 3) \mid \text{Wire Type}$$
-
-To decode a tag byte:
-$$\text{Wire Type} = \text{Tag} \ \& \ 0x07, \quad \text{Field Number} = \text{Tag} \gg 3$$
-
-*Example*:
-If byte is `0x08`: `0x08 = (1 << 3) | 0` $\rightarrow$ Field Number 1, Wire Type 0 (Varint).
-If byte is `0x12`: `0x12 = (2 << 3) | 2` $\rightarrow$ Field Number 2, Wire Type 2 (Length-delimited).
-
-#### Schema-Free Decoding with `protoc`
-```bash
-# Decode raw binary protobuf payload directly from CLI
-cat payload.bin | protoc --decode_raw
-
-# Output format:
-# 1: 1002
-# 2: "session_auth_token_xyz"
-# 3 {
-#   1: 1698574000
-#   2: "192.168.1.50"
-# }
-```
-
-### 3. Recovering Embedded `.proto` Descriptors from Binaries
-Many production binaries compiled with standard Protobuf libraries retain the compiled descriptor data in `.rodata`:
-- Scan the binary strings for `.proto` filenames:
-  ```bash
-  strings target_binary | grep -E "\.proto$"
-  ```
-- Look for `FileDescriptorProto` structures containing serialized metadata (package names, message names, field names).
-- Use `pbtk` to extract the full schema:
-  ```bash
-  python3 -m pbtk.extractor.extract target_binary /tmp/recovered_proto/
-  ```
-
-### 4. gRPC Service Reconstruction
-gRPC runs over HTTP/2 framing using binary Protobuf payloads:
-1. **HTTP/2 Headers**:
-   - `:path`: Follows the standard pattern `/<package>.<ServiceName>/<MethodName>`.
-   - `content-type`: `application/grpc` or `application/grpc+proto`.
-2. **gRPC Frame Header (5 Bytes)**:
-   - Byte 0: Compression Flag (`0x00` = uncompressed, `0x01` = compressed).
-   - Bytes 1–4: 32-bit big-endian length of the Protobuf payload.
-3. Carve the Protobuf payload starting at byte 5 and pass to `protoc --decode_raw` or Wireshark gRPC dissector.
+### State machines
+A protocol with a handshake (hello → auth → session) is a state machine. Recover it from the dispatcher: the opcode switch plus a per-connection state variable gates which opcodes are legal in each state. Record the state variable address and the legal-opcode set per state.
 
 ---
 
-## Concrete Code / Script Examples
+## 2. Protobuf Wire Format Without `.proto`
 
-### 1. Python Stream Carver for PCAPs
+Protobuf encodes `(tag, value)` pairs with no field names. The tag combines field number and wire type.
+
+### Wire types
+- **0 Varint**: `int32/64`, `uint32/64`, `sint32/64`, `bool`, `enum`.
+- **1 I64**: `fixed64`, `sfixed64`, `double`.
+- **2 LEN**: `string`, `bytes`, embedded messages, packed repeated.
+- **5 I32**: `fixed32`, `sfixed32`, `float`.
+- (Types 3/4 are the deprecated start/end-group markers.)
+
+### Tag math
+`tag = (field_number << 3) | wire_type`. Decode: `wire_type = tag & 0x07`, `field_number = tag >> 3`.
+- `0x08` = field 1, wire 0 (varint). `0x12` = field 2, wire 2 (length-delimited).
+
+### Decode
+```bash
+protoc --decode_raw < payload.bin
+# 1: 1002
+# 2: "session_token_xyz"
+# 3 { 1: 1698574000  2: "192.168.1.50" }
+```
+A LEN field whose bytes themselves decode cleanly as protobuf is an embedded message; otherwise treat it as `bytes`/`string`. `blackboxprotobuf` keeps a type map you can edit and re-encode for replay.
+
+---
+
+## 3. Recovering `.proto` Descriptors From Binaries
+
+Many builds keep the serialized `FileDescriptorProto` in `.rodata`:
+```bash
+strings -a target.bin | grep -E "\.proto$" || true
+```
+Then extract the full schema (not a module path — use the console script):
+```bash
+protodump -file target.bin -output ./recovered/      # Go descriptor extractor
+pbtk-from-binary target.bin ./recovered/             # alternative
+```
+The output `.proto` files give real field names and message names, which upgrade `decode_raw`'s numbered fields to semantic ones.
+
+---
+
+## 4. gRPC Service Reconstruction
+
+gRPC is Protobuf over HTTP/2:
+1. **HTTP/2 headers**: `:path` = `/<package>.<Service>/<Method>`; `content-type` = `application/grpc` or `application/grpc+proto`.
+2. **Length-prefixed message**: 1 byte compression flag (`00` none, `01` compressed) + 4-byte big-endian length, then the Protobuf payload.
+3. Carve from byte 5 and feed to `protoc --decode_raw`, or let Wireshark's gRPC dissector split it.
+4. If the server exposes reflection, `grpcurl ... describe` returns the schema directly (lab only).
+
+---
+
+## 5. Other Serialization Formats (Recognition)
+
+| Format | Tell |
+|---|---|
+| **FlatBuffers** | No parse step on read; a root-table offset at the buffer start, a vtable of field offsets, `flatbuffers` / `.fbs` strings. Access is pointer-chasing, not sequential decode. |
+| **Cap'n Proto** | Segment framing (4-byte segment count + sizes), `capnp` strings, pointer words with low-2-bit tags. |
+| **MessagePack** | Self-describing type bytes: `0x80-0x8f` fixmap, `0x90-0x9f` fixarray, `0xa0-0xbf` fixstr, `0xc0` nil, `0xc2/0xc3` false/true. Wireshark has a `msgpack` dissector. |
+| **Thrift** | Binary protocol: type byte + field id; compact protocol uses varints. `TBinaryProtocol`/`TCompactProtocol` strings; Wireshark `thrift` dissector. |
+| **BSON** | 4-byte total length prefix, type-tagged elements, `\x00` terminator. |
+| **ASN.1 DER** | TLV with type/length/value; `0x30` (SEQUENCE) is a common start. |
+
+---
+
+## 6. TLS Decryption via Keylog
+
+When the client uses TLS and you control the process, export session keys instead of breaking crypto:
+```bash
+# Client process writes NSS keylog; point Wireshark/tshark at it.
+SSLKEYLOGFILE=/tmp/keys.log <client>
+tshark -r capture.pcapng -o tls.keylog_file:/tmp/keys.log -Y http2 -V
+```
+Many runtimes honor `SSLKEYLOGFILE` (OpenSSL 1.1.1+, Go, NSS, BoringSSL builds that enable it). If not, hook the TLS write/read with Frida and capture plaintext before encryption. Keylog is lab-only and respects the egress rule.
+
+---
+
+## 7. Code Examples
+
+### 7.1 PCAP stream carver
 ```python
-#!/usr/bin/env python3
-"""
-pcap_carver.py - Extract TCP streams and parse binary message framing.
-"""
-import struct
-import sys
+# uv run --with scapy python -I pcap_carver.py capture.pcap
+import struct, sys
+from scapy.all import rdpcap, TCP, Raw
 
-def parse_custom_protocol(raw_bytes):
-    offset = 0
-    msg_count = 0
-    
-    while offset + 8 <= len(raw_bytes):
-        # Header: Magic(2B) = 0x5052 ("PR"), Opcode(2B), Length(4B big-endian)
-        magic, opcode, length = struct.unpack_from(">HHI", raw_bytes, offset)
-        
-        if magic != 0x5052:
-            # Re-synchronize stream by sliding 1 byte
-            offset += 1
+MAGIC = 0x5052  # "PR"
+
+def parse(raw: bytes):
+    off, n = 0, 0
+    while off + 8 <= len(raw):
+        magic, opcode, length = struct.unpack_from(">HHI", raw, off)
+        if magic != MAGIC:
+            off += 1            # resync one byte at a time
             continue
-            
-        header_len = 8
-        if offset + header_len + length > len(raw_bytes):
-            print(f"[-] Incomplete message at offset {offset}")
+        if off + 8 + length > len(raw):
+            print(f"[-] incomplete message at {off}")
             break
-            
-        payload = raw_bytes[offset + header_len : offset + header_len + length]
-        print(f"[+] Message #{msg_count}: Opcode=0x{opcode:04x}, Length={length}")
-        print(f"    Payload: {payload[:32].hex()}...")
-        
-        offset += header_len + length
-        msg_count += 1
+        body = raw[off + 8: off + 8 + length]
+        print(f"[+] #{n} op=0x{opcode:04x} len={length} body={body[:32].hex()}")
+        off += 8 + length
+        n += 1
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <raw_stream.bin>")
-        sys.exit(1)
-    with open(sys.argv[1], "rb") as f:
-        parse_custom_protocol(f.read())
+    stream = b"".join(bytes(p[Raw].load) for p in rdpcap(sys.argv[1])
+                      if p.haslayer(TCP) and p.haslayer(Raw))
+    parse(stream)
 ```
 
-### 2. Wireshark Lua Dissector Template (`custom_proto.lua`)
+### 7.2 Wireshark Lua dissector with TCP reassembly
+`dissect_tcp_pdus` handles segmentation across TCP packets; a naive `buffer(8,length)` breaks on split frames. This template is verified against a split-frame capture.
 ```lua
--- custom_proto.lua - Wireshark dissector for proprietary TCP protocol
-local custom_proto = Proto("custom_proto", "Custom Proprietary Protocol")
+-- custom_proto.lua  (run: tshark -X lua_script:custom_proto.lua -r cap.pcap -Y custom_proto)
+local p = Proto("custom_proto", "Custom Protocol")
+local f_magic  = ProtoField.uint16("custom_proto.magic",  "Magic",  base.HEX)
+local f_opcode = ProtoField.uint16("custom_proto.opcode", "Opcode", base.HEX,
+                   { [1] = "HELLO", [2] = "DATA", [3] = "BYE" })
+local f_length = ProtoField.uint32("custom_proto.length", "Length", base.DEC)
+local f_body   = ProtoField.bytes ("custom_proto.body",   "Body")
+p.fields = { f_magic, f_opcode, f_length, f_body }
+local HDR = 8
 
-local f_magic   = ProtoField.uint16("custom_proto.magic", "Magic", base.HEX)
-local f_opcode  = ProtoField.uint16("custom_proto.opcode", "Opcode", base.HEX)
-local f_length  = ProtoField.uint32("custom_proto.length", "Payload Length", base.DEC)
-local f_payload = ProtoField.bytes("custom_proto.payload", "Payload Data")
-
-custom_proto.fields = { f_magic, f_opcode, f_length, f_payload }
-
-function custom_proto.dissector(buffer, pinfo, tree)
-    local buf_len = buffer:len()
-    if buf_len < 8 then return end
-
-    local magic = buffer(0, 2):uint()
-    if magic ~= 0x5052 then return end
-
-    pinfo.cols.protocol = "CUSTOM_PROTO"
-
-    local subtree = tree:add(custom_proto, buffer(), "Custom Protocol Frame")
-    subtree:add(f_magic, buffer(0, 2))
-    subtree:add(f_opcode, buffer(2, 2))
-    
-    local length = buffer(4, 4):uint()
-    subtree:add(f_length, buffer(4, 4))
-
-    pinfo.cols.info = string.format("Opcode: 0x%04X, Len: %d", buffer(2, 2):uint(), length)
-
-    if buf_len >= 8 + length then
-        subtree:add(f_payload, buffer(8, length))
-    end
+local function pdu_len(tvb, pinfo, offset)
+  return HDR + tvb(offset + 4, 4):uint()       -- total PDU length for reassembly
 end
 
--- Register dissector on target TCP port
-local tcp_port = DissectorTable.get("tcp.port")
-tcp_port:add(9999, custom_proto)
+local function dissect_pdu(tvb, pinfo, tree)
+  pinfo.cols.protocol = "CUSTOM"
+  local t = tree:add(p, tvb(), "Custom Protocol PDU")
+  t:add(f_magic,  tvb(0, 2))
+  t:add(f_opcode, tvb(2, 2))
+  t:add(f_length, tvb(4, 4))
+  local n = tvb(4, 4):uint()
+  if n > 0 then t:add(f_body, tvb(HDR, n)) end
+  pinfo.cols.info:append(string.format(" op=0x%04x len=%d", tvb(2, 2):uint(), n))
+end
+
+function p.dissector(tvb, pinfo, tree)
+  if tvb:len() < 2 or tvb(0, 2):uint() ~= 0x5052 then return 0 end
+  dissect_tcp_pdus(tvb, tree, HDR, pdu_len, dissect_pdu)
+  return tvb:len()
+end
+
+DissectorTable.get("tcp.port"):add(9999, p)
 ```
 
-Run Wireshark or `tshark` with the Lua dissector:
-```bash
-tshark -X lua_script:custom_proto.lua -r capture.pcap -Y "custom_proto"
+### 7.3 Kaitai Struct spec
+A `.ksy` spec documents the format once and compiles to many languages. Compile with `ksc -t python custom.ksy`, then parse with the runtime (`uv run --with kaitaistruct python -I`). Field types `u2be`/`u4be` are big-endian; `u2le`/`u4le` little-endian.
+```yaml
+# custom.ksy
+meta:
+  id: custom_proto
+  endian: be
+seq:
+  - id: magic
+    contents: [0x50, 0x52]
+  - id: opcode
+    type: u2
+  - id: length
+    type: u4
+  - id: body
+    size: length
 ```
+
+---
+
+## 8. Replay and Fuzz to Confirm
+
+A recovered schema is a `candidate` until a round-trip confirms it:
+- **Replay**: re-encode a parsed message (blackboxprotobuf or Scapy) and send it to a **lab** endpoint or local stub; a well-formed response confirms the framing and field meaning.
+- **Fuzz**: mutate one field at a time against the stub and watch which fields the parser rejects; a strict length or type check confirms that field's role. See [fuzzing-for-reversing.md](../02-dynamic-instrumentation/fuzzing-for-reversing.md).
 
 ---
 
 ## Boundaries & Anti-Patterns
-- **Do not invent field semantics without binary evidence**: Document field names only when backed by string literals, log output, or decompiler variable references.
-- **Do not assume network integers are little-endian**: Standard network wire formats use big-endian (network byte order). Always verify whether conversion functions (`ntohl`, `be32toh`) are called in the disassembler.
-- **Do not replay extracted messages against unauthorized live endpoints**: All protocol testing and mutation must occur against contained local stubs or isolated lab VMs.
+- **Do not invent field semantics.** Name a field only when a string literal, log line, descriptor, or decompiler variable backs it.
+- **Do not assume little-endian.** Network order is big-endian. Check for `ntohl`/`be32toh`/`htons` in the disassembler.
+- **Do not replay against production.** All replay and mutation go to contained local stubs or lab VMs; egress follows the Rule 6 ledger.
+- **A silent dissector is not a negative.** No match may mean a wrong port or a split frame; confirm with `-V` on a known-good frame.

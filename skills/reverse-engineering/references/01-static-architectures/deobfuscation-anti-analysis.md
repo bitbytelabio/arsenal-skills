@@ -1,8 +1,9 @@
-# Deobfuscation & Anti-Analysis Countermeasures
+# Deobfuscation And Anti-Analysis Countermeasures
 
-## Title & Overview
-- **Domain**: Deobfuscation architectures, compiler-level obfuscator countermeasures (OLLVM variants), Mixed Boolean-Arithmetic (MBA) simplification, and systemic anti-analysis bypasses across Linux and Windows.
-- **Scope**: Modern reverse engineering techniques against Hikari, goron/Arkari, Pluto/Polaris, O-MVLL, amice, and Tigress. Automated MBA simplification using SMT/Z3, Arybo, and Triton. Comprehensive bypasses for anti-debugging, anti-VM, anti-DBI (Frida), and timing evasion.
+## When To Open
+Open this file when the decompiler output is unreadable because of the build, not because of the logic. Typical signs are a `while(1) switch(state)` around a whole function, opaque `if` conditions on globals, long `&`/`|`/`^`/`+` chains that compute a constant or a simple sum, indirect jumps through computed tables, VM sections (`.vmp0`, `.themida`), or checks for debuggers, VMs, and Frida. Identify the obfuscator family first. The removal tool depends on it.
+
+Scope: OLLVM-family passes (flattening, bogus control flow, substitution, indirect branches), MBA simplification, VM-based protectors, and an anti-debug / anti-VM / anti-instrumentation catalog per OS with the check and the bypass.
 
 ---
 
@@ -12,554 +13,316 @@ Identify the protector, then take the cheapest layer that answers the question. 
 
 Hook the function that consumes the secret, not the decryptor. `strcmp`, `dlsym`, `GetProcAddress`, JNI `FindClass` / `GetMethodID` / `NewStringUTF`, and file opens receive plaintext no matter which packer produced it. Filter by return address so only calls from the target module are kept. An unqualified export match with zero hits is ambiguous. Retry as `Module!symbol`.
 
-On Android, unpacking often finishes inside `JNI_OnLoad`. A legitimate `.so` almost never has an `RWX` segment. Watch `mprotect`: `r-x` to `rwx` and back to `r-x` is the dump point. Identify the module by an export at a known offset, not by a filename the packer can change. Section names `.vmp0`, `.themida`, `.cv0` select the protector. The lift, if you still need it, is section 3 below.
+On Android, unpacking often finishes inside `JNI_OnLoad`. A legitimate `.so` almost never has an `RWX` segment. Watch `mprotect`: `r-x` to `rwx` and back to `r-x` is the dump point. Identify the module by an export at a known offset, not by a filename the packer can change. Section names `.vmp0`, `.themida`, `.winlice` select the protector. The lift, if you still need it, is section 5. Dumping is [unpacking-memory-dump.md](../02-dynamic-instrumentation/unpacking-memory-dump.md).
 
-## 1. Modern OLLVM Variant Ecosystem
-
-Obfuscator-LLVM has evolved from simple legacy passes into commercial and advanced adversarial hardening frameworks. Identifying the specific compiler pass variant is mandatory before selecting an automated deobfuscator:
-
-### OLLVM Variant Taxonomy
-| Variant | Base LLVM | Core Obfuscation Primitives | Vulnerability & Countermeasure Strategy |
-|---|---|---|---|
-| **Hikari** | LLVM 6–8 | Anti-Class-Dump, Function Call Obfuscation, Function Wrapper, Indirect Branching, Basic Block Splitting, String Encryption. | Decrypt string tables first using emulation (Unicorn); trace wrapper trampolines back to real target addresses. |
-| **Hikari-LLVM15+** | LLVM 15–19 | Constant Encryption, Anti-Debugging, Anti-Hooking, Function Splitting. | Dynamic execution of decryption stubs; patch anti-debug routines in memory. |
-| **goron / Arkari** | LLVM 7–14+ | Indirect Jump / Indirect Call via `BR x8` / `jmp [rax]`, Global Variable encryption. | **Data Section Read-Only Counter**: Mark the data section read-only; forces indirect jump targets to resolve statically or deterministically. Use `DeObfBR`. |
-| **Pluto / Polaris** | LLVM 14–16 | MBA Obfuscation, Random CF, **Trap Angr** (designed to trigger path explosion in symbolic execution engines), Dirty Bytes, Linear MBA. | **Trap Angr Bypass**: Avoid bare `angr` path exploration. Use `d810-ng` Z3 rules or Unicorn micro-emulation to evaluate target blocks directly. |
-| **O-MVLL** | LLVM / Python | Python-driven pass manager: Anti-Hooking, Arithmetic MBA, Basic Block Duplicate, CF Breaking, Indirect Call, Opaque Constants. | Common in modern Android/iOS security modules. Profile Python configuration patterns; strip dead CF blocks with peephole microcode rules. |
-| **amice** | Rust LLVM | VM Flatten, Instruction Virtualization, Delayed Offset Loading, Parameter Aggregation. | **VM Flatten Counter**: Do not treat as basic switch flattening. Reverse the bytecode interpreter, decode virtual opcode dispatch tables, and lift virtual handlers. |
+Anything in this file that runs the sample belongs in the lab VM, under the dynamic rules. Static removal (d810-ng, deflat on a copy, MBA simplification) does not execute the target.
 
 ---
 
-## 2. De-flattening Decision Matrix
+## 1. Recognize The Obfuscator
 
-When confronting Control Flow Flattening (CFF) exhibiting central dispatcher loops and state variables:
-
-```text
-Control Flow Flattening Detected (while/switch loop)
-  │
-  ├── IDA Pro Hex-Rays Environment Available?
-  │     ├── YES (Microcode-level approach):
-  │     │     ├── Cloud service acceptable & max fidelity required:
-  │     │     │     └── obpo-plugin (Microcode + program slicing + concolic execution)
-  │     │     └── Local, offline requirement (Air-gapped / confidential):
-  │     │           └── d810-ng (Microcode rules + Z3 SMT solver, Tigress/Hodur support)
-  │     │
-  │     └── NO (Alternative or script environment):
-  │           ├── Binary Ninja Environment:
-  │           │     └── ollvm-breaker (Tailored for mobile ELF/shared objects)
-  │           ├── Pure CLI / Python Script:
-  │           │     ├── x86/x64 Binaries:
-  │           │     │     └── ollvm-unflattener (Miasm symbolic execution + BFS propagation)
-  │           │     ├── ARM64 Android .so:
-  │           │     │     └── deollvm (Unicorn-engine emulator deflat)
-  │           │     └── CTF / Custom Pipeline:
-  │           │           └── angr Deobfuscator (with path explosion bounding)
-```
-
-### Tool Execution Guides
-
-#### 1. d810-ng (IDA Pro Plugin)
-- Install into IDA plugins directory. Press `Ctrl+Shift+D` inside Hex-Rays view.
-- Select rule categories:
-  - `Unflattener`: Standard OLLVM switch/state variable machines.
-  - `UnflattenerSwitchCase` & `UnflattenerTigressIndirect`: Tigress `m_jtbl` and `m_ijmp`.
-  - `HodurUnflattener`: PlugX nested `while(1)` without central switch.
-  - `Predicate Simplification`: Strips opaque predicates (`setz`, `setnz`).
-
-#### 2. Binary Ninja ollvm-breaker
-```bash
-# In Binary Ninja Python console or standalone script
-from ollvm_breaker import Deflattener
-deflat = Deflattener(bv, func_addr=0x10040)
-deflat.run()
-```
-
-#### 3. Miasm ollvm-unflattener
-```bash
-python3 unflattener.py -i obfuscated_elf -o cleaned_elf -t 0x401200 -a
-# Flag -a recursively processes nested call targets via Breadth-First Search
-```
-
----
-
-## 2.1 Complete OLLVM Control Flow Flattening (CFF / `fla`) Recovery Algorithm
-
-Control Flow Flattening transforms normal hierarchical and loop control structures into an iterative state machine with a centralized dispatcher. Recovering the original control flow requires a deterministic 4-phase algorithm.
-
-### 1. Basic Block Categorization
-In flattened functions, basic blocks fall into five strict structural classes:
-
-```text
-                [ Prologue Block ] (Initializes state_var = S0)
-                        │
-                        ▼
-        ┌──────►[ Dispatcher Block ] ◄─────────────────────────────────┐
-        │               │                                              │
-        │               ▼                                              │
-        │       [ Sub-Dispatchers ] (Binary decision trees / switch)   │
-        │         │             │                                      │
-        │         ▼             ▼                                      │
-        │   [Relevant BB 1]  [Relevant BB 2]                           │
-        │   (Original code)  (Original code)                           │
-        │   (state = S1)     (if cond: state=S2; else: state=S3)       │
-        │         │             │                                      │
-        └─────────┴─────────────┴──────────────────────────────────────┘
-                                │
-                                ▼ (terminal state)
-                         [ Return Block ]
-```
-
-1. **Prologue Block**:
-   - Function entry point that performs stack setup, saves callee-saved registers, initializes local variables, and assigns the initial state constant to `state_var`.
-   - Terminates with an unconditional branch to the Main Dispatcher.
-2. **Main Dispatcher Block**:
-   - The head of the state machine loop.
-   - Receives inbound edges from the Prologue and all non-terminating Relevant Blocks.
-   - Compares `state_var` against target constants directly or branches into a tree of sub-dispatchers.
-3. **Sub-Dispatcher Blocks**:
-   - Intermediate decision nodes synthesized by LLVM switch-lowering (binary search trees or jump table stubs).
-   - Only perform comparisons or index arithmetic on `state_var` and route execution deeper into the switch tree or directly to Relevant Blocks. Contain no original business logic.
-4. **Relevant (Original) Blocks**:
-   - Contain the actual semantic logic of the original program before obfuscation.
-   - Identified by: executing operations other than pure state routing, possessing outbound edges back to the dispatcher loop, and updating `state_var` before exit.
-   - Form 1: *Unconditional Transition* — Computes a static constant update `state_var = NEXT_STATE; jmp dispatcher`.
-   - Form 2: *Conditional Transition* — Computes `state_var = condition ? STATE_TRUE : STATE_FALSE; jmp dispatcher` (often lowered using conditional moves `cmov` / `csel` or branch splits).
-5. **Return Block**:
-   - Terminal basic block(s) executing `ret` / `bx lr`, reached when `state_var` matches function termination criteria.
-
-### 2. State Variable (`state_var`) Identification & Transition Tracking
-1. **Locating `state_var`**:
-   - Parse the Prologue block's last written register or stack slot prior to branching into the Main Dispatcher.
-   - Trace memory accesses inside the Main Dispatcher: the variable read in the primary conditional comparison or switch index calculation is `state_var`.
-2. **State Transition Extraction**:
-   - Within each Relevant Block, slice forward from the block entry to locate writes targeting `state_var`.
-   - For blocks ending in conditional branches or `cmov` instructions, identify both candidate values `(state_true, state_false)` and the condition flag/register.
-
-### 3. Symbolic Execution & State Solving with `angr`
-For each Relevant Block $B_i$, use symbolic execution to resolve the mapping $(B_i, \text{condition}) \to B_{\text{next}}$ without manual path reconstruction:
-
-```python
-import angr
-import claripy
-
-def resolve_state_transitions(project, func_addr, dispatcher_addr, relevant_blocks):
-    """
-    Symbolically executes each relevant block until reaching the next relevant block,
-    bypassing dispatcher and sub-dispatcher blocks.
-    """
-    transitions = {}
-    cfg = project.analyses.CFGFast()
-    
-    for src_bb in relevant_blocks:
-        # Initialize symbolic state at the start of the relevant basic block
-        state = project.factory.blank_state(addr=src_bb)
-        # Constrain stack pointer and execution state
-        simgr = project.factory.simulation_manager(state)
-        
-        # Explore until hitting another relevant block or the return block
-        def is_target(s):
-            return s.addr in relevant_blocks and s.addr != src_bb
-            
-        def is_step(s):
-            # Step through dispatcher and sub-dispatchers, stop if looping indefinitely
-            return True
-
-        simgr.explore(find=is_target)
-        
-        resolved_targets = []
-        for found_state in simgr.found:
-            target_addr = found_state.addr
-            # Check feasibility and extract condition if branch was split
-            resolved_targets.append(target_addr)
-            
-        transitions[src_bb] = list(set(resolved_targets))
-    return transitions
-```
-
-### 4. Control Flow Graph Reassembly & Binary Patching
-Once transitions are resolved:
-1. **Direct Jumps**:
-   - For blocks with a single resolved successor $B_{\text{target}}$, overwrite the terminal jump targeting the dispatcher with an unconditional jump directly to $B_{\text{target}}$ (`jmp relative_offset` on x86, `B label` on ARM64).
-2. **Conditional Jumps**:
-   - For blocks with two successors $(B_{\text{true}}, B_{\text{false}})$, replace the state variable computation and `jmp dispatcher` with a native conditional branch (`jcc B_true; jmp B_false` on x86, `B.cond B_true; B B_false` on ARM64).
-3. **NOP Padding**:
-   - Fill slack bytes resulting from eliminated dispatcher assignments and indirect jumps with `NOP` (`0x90` on x86, `0x1F2003D5` on ARM64).
-4. **Dispatcher Decoupling**:
-   - The entire dispatcher loop and sub-dispatcher tree become dead code and are unreachable in the cleaned CFG, allowing IDA Pro / Ghidra / Binary Ninja decompilers to reconstruct clean control flow graphs.
-
----
-
-## 2.2 Bogus Control Flow (BCF / `bcf`) Elimination
-
-Bogus Control Flow injects opaque predicates that evaluate deterministically to true or false at runtime, nesting original basic blocks within artificial conditional checks and dead junk blocks.
-
-### Common Mathematical Opaque Predicates
-OLLVM and its downstream variants generate invariants based on number theory:
-1. **Consecutive Integer Parity**:
-   $$y \cdot (y + 1) \pmod 2 = 0 \quad (\forall y \in \mathbb{Z})$$
-   - Obfuscated check: `if ((y * (y + 1)) % 2 == 0)` always branches to the true path. The false path contains mutant instructions or infinite traps.
-2. **Quadratic Residue Invariant**:
-   $$7y^2 - 1 \neq x^2 \quad (\forall x, y \in \mathbb{Z})$$
-   - In modulo 7 arithmetic, squares are quadratic residues $\{0, 1, 2, 4\}$. $7y^2 - 1 \equiv -1 \equiv 6 \pmod 7$, which is never a square modulo 7.
-   - The conditional branch guarding $7y^2 - 1 == x^2$ is an invariant false path.
-
-### Pruning & Patching Workflow
-1. **Dead Block Identification**:
-   - Query Z3 or SMT solvers to test the satisfiability of both branch conditions:
-     $$\text{Is } (7 \cdot y^2 - 1 == x^2) \text{ SAT for bit-vectors of size } W? \to \text{UNSAT}$$
-2. **Branch Conversion**:
-   - Locate the conditional jump (`jz`, `jnz`, `beq`, `b.ne`) corresponding to the opaque predicate.
-   - If the condition is always True: Patch `jcc target_true` to `jmp target_true` (or remove fall-through branch).
-   - If the condition is always False: Replace conditional jump with `NOP` instructions or invert to unconditional jump to the real target.
-3. **Dead Code Elimination**:
-   - Fill the dead/bogus basic block with `NOP` or `INT3` (`0xCC`) bytes to prevent decompilers from processing junk code.
-
----
-
-## 2.3 Instruction Substitution (`sub`) & Arithmetic Normalization
-
-Instruction Substitution replaces standard arithmetic instructions with equivalent complex multi-instruction sequences.
-
-### Inverse Pattern Replacement Table
-| Operation | Obfuscated Sequence | Inverse Deobfuscation Rewrite |
+| Family | Signature in the binary | Passes |
 |---|---|---|
-| `a = b + c` | `a = b - (-c)` | `ADD a, b, c` |
-| `a = b + c` | `a = (b ^ c) + 2 * (b & c)` | `ADD a, b, c` |
-| `a = b - c` | `a = b + (~c) + 1` | `SUB a, b, c` |
-| `a = b ^ c` | `a = (b \| c) - (b & c)` | `XOR a, b, c` |
-| `a = b ^ c` | `a = (b & ~c) \| (~b & c)` | `XOR a, b, c` |
-| `a = b \| c` | `a = (b & c) + (b ^ c)` | `OR a, b, c` |
-| `a = b & c` | `a = (b \| c) - (b ^ c)` | `AND a, b, c` |
+| OLLVM 4.0 (original) | `.comment` may say `Obfuscator-LLVM clang version 4.0.1`. BCF predicates on two globals `x`/`y`: `y < 10 \|\| ((x*(x-1)) & 1) == 0` | `-fla`, `-bcf`, `-sub`, `-split` |
+| Hikari / Hikari-LLVM15 | ObjC-heavy iOS code, string decryption stubs called from every function, `objc_msgSend` wrappers, anti-class-dump | Flattening, BCF, substitution, string encryption, function wrappers, indirect branch, anti-debug/anti-hook |
+| goron / Arkari | `br x8` / `jmp rax` where the target is `table[i] + key` loaded from a global table | Indirect branch, indirect call, indirect global variable, string encryption |
+| Pluto / Polaris | Flattening plus heavy MBA. Pluto has a pass that targets angr. | Flattening, MBA, global encryption |
+| O-MVLL (Open-Obfuscator) | Android/iOS, configured by a Python file | Arithmetic MBA, opaque constants, flattening, string encoding, anti-hook |
+| Tigress | Research/CTF. Flattening with `switch`, `goto` tables, or indirect jumps; VM with custom bytecode | Flatten, Virtualize, EncodeArithmetic, Split |
+| Commercial mobile (DexGuard/iXGuard, Arxan/Digital.ai, Approov SDK) | Flattened native libraries, integrity checks over `.text`, encrypted strings | Varies. d810-ng ships an Approov config. |
 
-Reversing substitution requires AST expression simplification (Hex-Rays microcode filters, Binary Ninja MLIL passes, or D810 rules) to match the canonical identity trees and rewrite them to single operations.
-
----
-
-## 2.4 Goron / Arkari Indirect Branch Deobfuscation
-
-Goron and Arkari obfuscate control flow by replacing direct branches and calls with indirect jumps (`BR x8` on ARM64, `jmp [rax]` on x86_64) using targets loaded from global memory tables encrypted or initialized at runtime.
-
-### Read-Only Data Section Technique
-1. **Vulnerability**:
-   - Goron relies on static relocations and data arrays initialized by constructors (`.init_array`) or loaded as constants from `.data` / `.got`.
-2. **Countermeasure (`DeObfBR` Pattern)**:
-   - Mark the data section as strictly Read-Only in the analysis context or emulator.
-   - In IDA Pro / Binary Ninja: Inspect the instructions immediately preceding `BR x8`:
-     ```assembly
-     ADRP    X8, #page_table_offset
-     LDR     X8, [X8, #elem_offset]
-     ADD     X8, X8, X9
-     BR      X8
-     ```
-   - SMT / Constant Propagation: Evaluate the offset equations symbolically with memory contents frozen. Because the table indices are fixed constants for each control branch, the destination address simplifies to a single constant pointer.
-   - Patch `BR x8` with direct branch `B target_func`.
+Version tags in `.comment` (`readelf -p .comment "$BIN"`) or Mach-O `LC_BUILD_VERSION` sometimes name the fork. Their absence is normal.
 
 ---
 
-## 2.5 Trap Angr Bypass (Pluto / Polaris)
+## 2. Control-Flow Flattening
 
-Obfuscators such as Pluto and Polaris deliberately incorporate "Trap Angr" routines: high-complexity loop traps, recursive hash loops, and unsolvable branch dependencies designed to cause memory exhaustion, path explosion, and timeouts in symbolic engines like `angr`.
+### Recognize
+- Entry block writes a constant to `state` and jumps to a dispatcher.
+- The dispatcher loads `state` and branches by comparisons (binary-search tree of `cmp state, imm`) or a jump table.
+- Every real block ends with `state = CONST` or `state = cond ? S1 : S2` (`cmov`/`csel`) and jumps back to a common latch.
+- Constants look random (`0x5F3E1A2B`). Each appears exactly once as a write and once as a compare.
 
-### Countermeasure & Micro-Emulation Strategies
-1. **Bypassing Full-Path Exploration**:
-   - Never invoke `simgr.explore()` across entire functions containing Trap Angr primitives.
-2. **Selective Micro-Emulation (Unicorn Engine)**:
-   - Confine emulation strictly to basic block state variable transformations.
-   - Isolate CPU register state, map only code pages and the local stack frame, execute single basic blocks for a maximum instruction count threshold (e.g., 200 instructions), and inspect output state variables directly.
-3. **Path Pruning Hooks**:
-   - Hook known trap blocks (e.g., recursive cycles with no external state modification) using `project.hook(trap_addr, hook_function)` to immediately terminate or drop states entering dead-end traps.
+Block classes: prologue, dispatcher, sub-dispatchers (only compare/branch on `state`), relevant blocks (real code plus a `state` write), latch (jumps to the dispatcher), return.
+
+### Remove: Decision Table
+| Situation | Tool | How |
+|---|---|---|
+| IDA 9 with Hex-Rays | **d810-ng** (`w00tzenheimer/d810-ng`) | Copy into the IDA plugins directory. Optional speedups: `pip3 install d810-ng[speedups]` then `python -m d810.speedups.install`. `Ctrl-Shift-D` opens the GUI. Load `default_unflattening_ollvm.json` (or `default_unflattening_approov.json`, `hodur_deobfuscation.json`) and start, then decompile again. Rules: `Unflattener` (OLLVM), `UnflattenerSwitchCase` (Tigress `switch`), `UnflattenerTigressIndirect` (needs `goto_table_info`), `HodurUnflattener` (PlugX-style nested loops), `UnflattenerFakeJump`, `JumpFixer`. |
+| IDA 7.5–8.x | joydo/d810 (original, `pip3 install z3-solver`, same hotkey) or HexRaysDeob forks | IDA 8.4 is the newest version a HexRaysDeob fork claims |
+| x86/x64/ARM ELF, no IDA, patched binary wanted | `cq674350529/deflat` (angr) | `python3 deflat.py -f "$BIN" --addr 0x400530` (function start). BCF: `python3 debogus.py -f "$BIN" --addr 0x80483e0`. Writes `<name>_recovered` beside the input. Run it on a copy. Pin the angr version the repo was tested with. |
+| x86/x64, Miasm | `mrT4ntr4/MODeflattener` | `python3 modeflattener.py [-a] "$BIN" patched.bin 0x401200`. `-a` follows calls. |
+| Binary Ninja | `amimo/ollvm-breaker` | Example script `tests/fix-libvdog.py` for an Android `.so`. It is a script template, not a package. Adapt it per target. |
+| Hex-Rays, cloud allowed | obpo-plugin (archived 2023) | Closed-source core. It sends function bytes to a remote server. Do not use it on confidential samples. |
+| Nothing fits | The algorithm below with your own emulator | |
+
+### Algorithm (Any Tool)
+1. Find `state`: the register or stack slot the dispatcher compares. Its value at the prologue's exit is the start state.
+2. Find relevant blocks: predecessors of the latch that are not dispatcher nodes.
+3. For each relevant block, compute the next state. Emulate the block alone (Unicorn) or solve its last write symbolically. If the write depends on a flag (`cmov`/`csel`), solve both outcomes.
+4. Map state constants to blocks by walking the dispatcher with each constant (concrete emulation of only the dispatcher is enough).
+5. Patch: replace the `state` write + jump-to-latch with `jmp target`, or `jcc T; jmp F` for two-way blocks. Leave the dispatcher unreachable. Do not delete it. Fill freed bytes with `nop` (`0x90`, arm64 `0xD503201F`).
+6. Re-decompile and check that every relevant block has exactly the successors you derived.
+
+Pitfalls: `state` can be updated through an MBA or a lookup table (resolve it per block, not by pattern). Some forks split `state` into two variables or encode it (`state ^ key`). Relevant blocks can call functions that never return; give them no successor. Loops in the original code show up as a relevant block whose next state is its own or an earlier state. That is correct.
 
 ---
 
-## 3. Mixed Boolean-Arithmetic (MBA) Simplification
+## 3. Bogus Control Flow And Opaque Predicates
 
-Obfuscators replace elementary arithmetic operations with complex combinations of bitwise logic and arithmetic expressions.
+OLLVM BCF wraps real blocks in `if (P)` where `P` is constant at runtime. The dead branch holds a mutated clone of the real block.
 
-### Theory of Linear and Non-Linear MBA Expressions
-- **Linear MBA**: Expressions composed of bitwise operations (AND, OR, NOT, XOR) and modular arithmetic (addition, subtraction, multiplication by constants) where variables do not multiply with each other:
-  $$f(x_1, \dots, x_n) = \sum_{i} a_i \cdot \text{bit\_op}_i(x_1, \dots, x_n) \pmod{2^w}$$
-  Every linear MBA expression can be transformed into a linear combination over a vector space of truth-table basis functions, making them solvable in polynomial time using linear algebra or coefficient matching.
-- **Non-Linear MBA**: Expressions containing variable-by-variable multiplications (e.g., $(x \land y) \cdot (x \lor y)$) or high-degree polynomials over bitwise terms. Non-linear MBAs cannot be directly mapped to a linear basis and require algebraic simplification, Term Rewriting Systems (TRS), or synthesis via SMT solvers.
-
-### Canonical Linear & Non-Linear MBA Identities
-```text
-Elementary Operation        Obfuscated MBA Identity
-----------------------------------------------------------------------------------
-x + y                 <==>  (x ^ y) + 2 * (x & y)
-x + y                 <==>  (x | y) + (x & y)
-x - y                 <==>  (x ^ ~y) + 2 * (~x & y) + 1
-x ^ y                 <==>  (x | y) - (x & y)
-x ^ y                 <==>  (x & ~y) | (~x & y)
-~x                    <==>  -x - 1
-x * y                 <==>  (x & y) * (x | y) + (x & ~y) * (~x & y)
-```
-
-### SMT-Based Synthesis & Algebraic Simplification Script
-The following production-ready Python script uses Z3 to simplify arbitrary MBA expressions into elementary operations, combining candidate equivalence verification with SMT synthesis:
+| Predicate | Why it is constant | Holds modulo 2ⁿ? |
+|---|---|---|
+| `(x*(x+1)) & 1 == 0` (OLLVM uses `x*(x-1)`) | Product of consecutive integers is even | Yes (Z3, 32-bit) |
+| `7*y*y - 1 != x*x` | `7y²−1 mod 8 ∈ {3,6,7}`, squares mod 8 ∈ {0,1,4} | Yes (Z3, 8- and 16-bit) |
+| `y < 10 \|\| ...` on a global | The global is never written | Only if no code writes it. Check xrefs. |
 
 ```python
-#!/usr/bin/env python3
-"""
-Mixed Boolean-Arithmetic (MBA) Simplification Engine using Z3.
-Simplifies linear and non-linear MBA formulas into canonical elementary operations.
-"""
+# Prove a branch condition constant. uv run --with z3-solver python -I opaque.py
+from z3 import BitVec, Solver, unsat
+x, y = BitVec("x", 32), BitVec("y", 32)
+cond = (x * (x + 1)) & 1 == 0          # transcribe the decompiled predicate
+s = Solver(); s.add(cond == False)
+print("always true" if s.check() == unsat else f"not constant: {s.model()}")
+```
 
-import sys
-from z3 import BitVec, BitVecVal, Solver, simplify, unsat, sat, substitute
+Patch `jcc` to `jmp` (always taken) or `nop` (never taken), then let the decompiler drop the dead block. d810-ng's predicate rules and `debogus.py` do this automatically. When the predicate reads globals, treat them as symbolic only if something can write them. Otherwise substitute their initial values.
 
+---
 
-class MBASimplifier:
-    def __init__(self, bit_width=32):
-        self.bit_width = bit_width
+## 4. Instruction Substitution And MBA
 
-    def prove_equivalence(self, expr1, expr2):
-        """
-        Proves that expr1 is mathematically equivalent to expr2 for all bit-vector inputs.
-        Returns True if (expr1 != expr2) is UNSATISFIABLE.
-        """
-        solver = Solver()
-        solver.add(expr1 != expr2)
-        return solver.check() == unsat
+### Substitution Identities (Verified With Z3 At 32 Bits)
+| Original | Obfuscated forms |
+|---|---|
+| `x + y` | `(x ^ y) + 2*(x & y)`, `(x \| y) + (x & y)`, `x - (-y)`, `2*(x \| y) - (x ^ y)` |
+| `x - y` | `x + ~y + 1`, `(x ^ y) - 2*(~x & y)` |
+| `x ^ y` | `(x \| y) - (x & y)`, `(x & ~y) \| (~x & y)` |
+| `x \| y` | `(x & y) + (x ^ y)` |
+| `x & y` | `(x \| y) - (x ^ y)` |
+| `~x` | `-x - 1` |
+| `x * y` | `(x & y)*(x \| y) + (x & ~y)*(~x & y)` (non-linear; proved at 8 bits) |
 
-    def simplify_binary_expression(self, raw_expr_fn):
-        """
-        Tests the target expression against canonical arithmetic and bitwise candidates.
-        Falls back to linear basis synthesis and Z3 algebraic rewriting.
-        """
-        x = BitVec('x', self.bit_width)
-        y = BitVec('y', self.bit_width)
-        target_expr = raw_expr_fn(x, y)
+`(x ^ ~y) + 2*(~x & y) + 1` equals `y - x`, not `x - y`. Check direction with a solver before you rewrite.
 
-        # 1. Direct Elementary Candidate Matching
-        elementary_candidates = [
-            ("x + y", x + y),
-            ("x - y", x - y),
-            ("y - x", y - x),
-            ("x ^ y", x ^ y),
-            ("x & y", x & y),
-            ("x | y", x | y),
-            ("~(x ^ y)", ~(x ^ y)),
-            ("~(x & y)", ~(x & y)),
-            ("~(x | y)", ~(x | y)),
-            ("x", x),
-            ("y", y),
-            ("-x", -x),
-            ("-y", -y),
-            ("~x", ~x),
-            ("~y", ~y),
-            ("0", BitVecVal(0, self.bit_width)),
-        ]
+### Linear Vs Non-Linear
+A linear MBA is `Σ aᵢ · bitwiseᵢ(x, y, ...)`. It is fully determined by its values on inputs in `{0,1}`, so it simplifies in polynomial time (SiMBA). Products of variables or of bitwise terms make it non-linear (GAMBA, msynth, synthesis).
 
-        for name, cand in elementary_candidates:
-            if self.prove_equivalence(target_expr, cand):
-                return name
+| Expression type | Tool | Command |
+|---|---|---|
+| Linear | SiMBA | `python3 src/simplify.py "(x^y)+2*(x&y)" -b 32 -z` (`-z` proves with Z3, `-l` checks linearity) |
+| Polynomial / mixed | GAMBA | `python3 src/simplify_general.py "<expr>" -b 32 -z` |
+| From a binary function | msynth (Miasm) | `python scripts/gen_oracle.py database/3_variables_constants_7_nodes.txt oracle.pickle`, then `python scripts/symbolic_simplification.py "$BIN" 0x1290 oracle.pickle` |
+| Inside IDA | d810-ng | Pattern and Z3 rules run on microcode during decompilation |
+| From a trace | Triton (`pip install triton-library`) | Lift, then `ctx.simplify(node, llvm=True)` or `ctx.synthesize(node, constant=True, subexpr=True, opaque=False)` |
 
-        # 2. Linear MBA Basis Synthesis
-        # Basis vector for 2-variable linear MBA: [x, y, x & y, x | y, x ^ y, 1]
-        basis = [x, y, x & y, x | y, x ^ y, BitVecVal(1, self.bit_width)]
-        basis_names = ["x", "y", "(x & y)", "(x | y)", "(x ^ y)", "1"]
-        coeffs = [BitVec(f"c_{i}", self.bit_width) for i in range(len(basis))]
+Do not hand-simplify long expressions. Copy the expression from the decompiler, simplify it with a tool, then prove equality with Z3 at the real bit width.
 
-        # Sample concrete vectors to rapidly solve for candidate coefficients
-        samples = [
-            (0, 0), (1, 0), (0, 1), (1, 1),
-            (0xFFFFFFFF, 0), (0, 0xFFFFFFFF),
-            (0x12345678, 0x9ABCDEF0), (0x55555555, 0xAAAAAAAA)
-        ]
+### Linear MBA Simplifier (Self-Contained)
+Implements the truth-table idea behind SiMBA. Tested: `(x|y)-(x&y)` → `x^y`, `(x^y)+2*(x&y)` → `1*(x) + 1*(y)`, `-x-1` → `~(x)`, and a 3-variable expression whose result Z3 proved equal at 32 bits. Linear input only. A non-linear input gives a wrong answer, so prove the output with Z3.
 
-        synth_solver = Solver()
-        for sx, sy in samples:
-            pt_map = [(x, BitVecVal(sx, self.bit_width)), (y, BitVecVal(sy, self.bit_width))]
-            target_val = substitute(target_expr, *pt_map)
-            
-            sum_expr = BitVecVal(0, self.bit_width)
-            for i, b in enumerate(basis):
-                sum_expr = sum_expr + coeffs[i] * substitute(b, *pt_map)
-            synth_solver.add(target_val == sum_expr)
+```python
+# linmba.py. python3 -I linmba.py "<linear MBA>" [bits]
+import itertools, re, sys
 
-        if synth_solver.check() == sat:
-            model = synth_solver.model()
-            solved_coeffs = [
-                model[c].as_long() if model[c] is not None else 0 
-                for c in coeffs
-            ]
-            
-            # Validate synthesized candidate globally
-            candidate_expr = BitVecVal(0, self.bit_width)
-            for i, b in enumerate(basis):
-                candidate_expr = candidate_expr + BitVecVal(solved_coeffs[i], self.bit_width) * b
+def simplify_linear(expr, bits=64):
+    mask = (1 << bits) - 1
+    names = sorted(set(re.findall(r"\b[a-z]\w*\b", expr)))
+    f = eval("lambda " + ",".join(names) + ": " + expr)  # your own expression text, not sample data
+    pts = list(itertools.product((0, 1), repeat=len(names)))
+    sig = [f(*p) & mask for p in pts]
+    signed = lambda c: c - (1 << bits) if c >> (bits - 1) else c
 
-            if self.prove_equivalence(target_expr, candidate_expr):
-                terms = []
-                for i, val in enumerate(solved_coeffs):
-                    if val != 0:
-                        term_str = basis_names[i]
-                        terms.append(f"{val} * {term_str}" if val != 1 else term_str)
-                return " + ".join(terms) if terms else "0"
+    # 1. Try a*g + b for one bitwise function g.
+    cands = list(names)
+    for a, b in itertools.combinations(names, 2):
+        cands += [f"{a}&{b}", f"{a}|{b}", f"{a}^{b}", f"{a}&~{b}", f"~{a}&{b}"]
+    if len(names) > 2:
+        cands += ["&".join(names), "|".join(names), "^".join(names)]
+    cands += [f"~({c})" for c in cands]
+    best = None
+    for c in cands:
+        g = eval("lambda " + ",".join(names) + ": " + c)
+        gs = [g(*p) & mask for p in pts]
+        diff = next((i for i in range(len(pts)) if gs[i] != gs[0]), None)
+        if diff is None or (gs[diff] - gs[0]) % 2 == 0:
+            continue
+        a = ((sig[diff] - sig[0]) * pow(gs[diff] - gs[0], -1, 1 << bits)) & mask
+        b = (sig[0] - a * gs[0]) & mask
+        if all((a * gs[i] + b) & mask == sig[i] for i in range(len(pts))):
+            a, b = signed(a), signed(b)
+            out = c if a == 1 else f"-({c})" if a == -1 else f"{a}*({c})"
+            out += f" + {b}" if b > 0 else f" - {-b}" if b < 0 else ""
+            if best is None or (abs(a) != 1, b != 0) < best[0]:
+                best = ((abs(a) != 1, b != 0), out)
+    if best:
+        return best[1]
 
-        # 3. Fallback to Algebraic Z3 Simplification
-        return str(simplify(target_expr))
-
+    # 2. General linear form: sum of c_S * AND(S), by Moebius inversion.
+    terms = []
+    for k in range(len(names) + 1):
+        for S in itertools.combinations(range(len(names)), k):
+            c = sum((-1) ** (len(S) - len(T)) * f(*[1 if i in T else 0 for i in range(len(names))])
+                    for j in range(len(S) + 1) for T in itertools.combinations(S, j)) & mask
+            if c:
+                terms.append(f"{signed(c)}*({'&'.join(names[i] for i in S) or '1'})")
+    return " + ".join(terms) or "0"
 
 if __name__ == "__main__":
-    simplifier = MBASimplifier(bit_width=32)
-
-    test_cases = [
-        ("Linear Addition MBA", lambda x, y: (x ^ y) + 2 * (x & y)),
-        ("Alternative Addition MBA", lambda x, y: (x | y) + (x & y)),
-        ("Subtraction MBA Identity", lambda x, y: (x ^ ~y) + 2 * (~x & y) + 1),
-        ("XOR Difference MBA", lambda x, y: (x | y) - (x & y)),
-        ("Complex Synthesizable Linear MBA", lambda x, y: 3 * (x ^ y) + 2 * (x & y) + (x | y) - 5),
-    ]
-
-    print("[*] Running SMT Mixed Boolean-Arithmetic Simplification:")
-    for name, expr_fn in test_cases:
-        simplified_str = simplifier.simplify_binary_expression(expr_fn)
-        print(f"  [-] {name:<35} -> {simplified_str}")
+    print(simplify_linear(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 64))
 ```
 
-### Tooling Integration: Arybo, SSPAM, and Triton
-1. **Arybo**:
-   - Python library that models bit-vector expressions over boolean rings and polynomials.
-   - Transforms MBA trees into canonical polynomial representations, collapsing redundant terms automatically.
-2. **SSPAM (Symbolic Simplification with Pattern Matching)**:
-   - Specializes in Term Rewriting Systems (TRS) for non-linear MBAs.
-   - Normalizes arithmetic and bitwise expressions through associative-commutative (AC) pattern replacement rules.
-3. **Triton**:
-   - Lifts native instructions directly to Triton AST representation.
-   - Integrates custom SMT simplification callbacks on instruction emulation to simplify MBA registers before committing state.
+Prove the result before you use it:
+```python
+# uv run --with z3-solver python -I prove.py
+from z3 import BitVec, Solver, unsat
+x, y = BitVec("x", 32), BitVec("y", 32)
+s = Solver(); s.add((x | y) - (x & y) != x ^ y)
+print("equal" if s.check() == unsat else s.model())
+```
+Z3 proves linear identities at 32/64 bits in seconds. Non-linear ones (products) can take minutes or time out at 32 bits. Prove at 8 and 16 bits first, then add a random-test sweep at full width.
 
 ---
 
-## 3.1 VM-Protected Code Devirtualization (VMProtect, Themida, Code Virtualizer)
+## 5. Indirect Branches (goron, Arkari, Hikari)
 
-Instruction virtualization compilers translate native architecture instructions (x86/x64/ARM) into proprietary bytecode executed by an embedded software interpreter (virtual machine).
-
-### Theoretical Architecture of Instruction Virtualization Protectors
-A virtualized binary execution environment comprises five core structural components:
-
+Pattern (arm64):
 ```text
-     Native Program Flow
-             │
-             ▼
-      [ VM Entry Stub ] (Pushes native registers, initializes VSP/VPC, transitions to VM)
-             │
-             ▼
-      ┌─►[ Dispatcher Loop ] (Reads bytecode via VPC, decodes opcode)
-      │      │
-      │      ▼
-      │  [ Handler Table / Dynamic Jump ] (Routes to handler address based on opcode)
-      │      │
-      │      ▼
-      │  [ Virtual Handler ] (Executes virtualized instruction: e.g., vADD, vREAD_MEM)
-      │      │ (Updates VSP, increments VPC)
-      └──────┘
-             │
-             ▼
-      [ VM Exit Stub ] (Restores native registers from VSP, jumps back to native OEP)
+adrp x8, table@PAGE
+add  x8, x8, table@PAGEOFF
+ldr  x9, [x8, w10, uxtw #3]   ; table entry
+add  x9, x9, x11              ; + per-function key, sometimes from another global
+br   x9
 ```
+1. The table and the key are constants in `.data`/`.rodata`, or written once by an `.init_array` constructor.
+2. Resolve each site by constant propagation with the data section frozen. In IDA, mark the table segment read-only (or set the globals `const`) so Hex-Rays folds the loads, then use d810-ng's `JumpFixer`. Otherwise emulate the few instructions before `br` with Unicorn and read the target.
+3. If the constructor computes the table, emulate the constructor first and use its output, or dump `.data` after init in the lab.
+4. Patch `br x9` to `b target` (or add a code xref and set the indirect-jump target in IDA) and re-analyze.
 
-1. **Bytecode Container**:
-   - Encrypted or obfuscated memory buffer containing custom variable-length bytecode streams that encode virtual instructions, operands, and immediate data.
-2. **Virtual Program Counter (VPC)**:
-   - Register or memory pointer (e.g., `rsi`, `rbx`, or stack slot) tracking the current position within the bytecode container.
-3. **Virtual Stack Pointer (VSP)**:
-   - Dedicated CPU register (e.g., `rbp` or `rdi`) pointing to a private stack frame where operands, intermediate calculations, and virtual registers are stored.
-4. **Dispatcher Loop**:
-   - Central interpreter loop that fetches bytecode bytes via `*VPC++`, applies decoding transformations (XOR/ROL/SUB decryption keys), and indexes into the Handler Table.
-5. **Virtual Handler Table & Virtual Handlers**:
-   - Table of function pointers or dynamic indirect jumps (`jmp [rax + rbx*8]`) resolving to small code blocks ("handlers").
-   - Each handler performs a single primitive: arithmetic (`vADD`, `vSUB`, `vMUL`), bitwise logic (`vNAND`, `vNOR`), memory operations (`vLOAD`, `vSTORE`), stack management (`vPUSH`, `vPOP`), or control branching (`vJMP`, `vJCC`).
-
-### 5-Step Devirtualization Workflow
-
-#### Step 1: Trace Acquisition
-Record a full dynamic instruction trace of the VM execution from VM Entry to VM Exit:
-- **Tracer Options**:
-  - Triton: Fine-grained symbolic trace logging with memory and register tainting.
-  - QEMU / TCG plugins: Full-system, evasion-resistant execution trace.
-  - GDB / LLDB scripts: Breakpoint-driven single-stepping tracing handlers and memory accesses.
-  - Frida Stalker: Fast userland dynamic block and instruction tracing (`Stalker.follow()`).
-
-#### Step 2: Context Normalization & Handler Classification
-1. **Context Normalization**:
-   - Identify and strip interpreter noise: instruction loops calculating rolling decryption keys, register swapping (`xchg`), and junk instructions inserted between real semantics.
-2. **Handler Classification**:
-   - Group handler code blocks by semantic operation based on their stack effect ($\Delta \text{VSP}$) and memory/register mutations:
-     - **Arithmetic / Logic**: Reads top $N$ elements from VSP, computes result, writes back to VSP.
-     - **Memory Read / Write**: Dereferences target address and reads/writes guest memory.
-     - **Conditional Branch**: Calculates condition code, conditionally updates VPC to target bytecode offset.
-
-#### Step 3: Bytecode Disassembly & Lifting to Intermediate Representation (IR)
-1. **Bytecode Disassembly**:
-   - Map each opcode byte back to its classified semantic handler name and operand format.
-2. **IR Lifting**:
-   - Lift decoded virtual handlers into an explicit Intermediate Representation:
-     - **VTIL (Virtual Technology Intermediate Language)**: Ideal for deobfuscation and VM devirtualization.
-     - **LLVM IR**: Enables standard LLVM compiler optimization passes.
-
-#### Step 4: Optimization & Dead-Code Elimination on IR
-Perform optimization passes over the lifted IR:
-1. **Stack Elimination**:
-   - Eliminate redundant VSP pushes and pops by mapping virtual stack slots back to virtual registers (`vreg0`, `vreg1`).
-2. **Dead-Code Elimination (DCE)**:
-   - Strip handler flags calculations, opaque predicates within the VM interpreter, and unreferenced temporary variables.
-3. **Peephole Rewriting & Pattern Recombination**:
-   - Recombine multi-handler decompositions back into single high-level operations (e.g., replace `vPUSH a; vPUSH b; vNOR; vPUSH a; vNOR; vAND` with canonical bitwise logic).
-
-#### Step 5: Decompilation or Native Re-emission
-1. **Clean C Decompilation**:
-   - Export the cleaned, optimized IR to Ghidra or IDA Pro Hex-Rays as High-Level IR / Microcode to decompile into readable C pseudo-code.
-2. **Native Assembly Patching**:
-   - Recompile the optimized IR back into native x86_64 or ARM64 instructions.
-   - Overwrite the original VM Entry trampoline with an unconditional jump to the newly generated native code section, completely decoupling the protected binary from the virtual machine runtime.
-
-### Devirtualization Tooling Ecosystem
-- **NoVmp**: Automated static and dynamic devirtualization tool specifically tailored for VMProtect 3.x architectures.
-- **VTIL (Virtual Technology Intermediate Language)**: Complete IR toolkit featuring stack analysis, register propagation, and dead-code elimination pipelines designed for VM lifting.
-- **Triton**: Pin/C++ dynamic symbolic execution framework supporting complete taint analysis and AST representation of VM dispatchers.
-- **Miasm**: Python-based reverse engineering framework providing symbolic execution, intermediate representation lifting, and binary rewriting for VM unpacking.
+Indirect calls are the same with `blr`. Recovering them restores the call graph, which is usually more valuable than the CFG inside one function.
 
 ---
 
-## 4. Comprehensive Anti-Analysis Bypass Catalog
+## 6. Symbolic Execution Limits
+- Do not run `explore()` over a whole flattened function. State count grows with every dispatcher pass. Execute one relevant block at a time with a step limit, as `deflat.py` does.
+- Pluto/Polaris add constructs aimed at angr (loops on symbolic input, large MBA). Concretize everything except `state` and the branch flag.
+- Hook or skip calls inside relevant blocks (`project.hook(addr, angr.SIM_PROCEDURES["stubs"]["ReturnUnconstrained"]())`). Their internals do not decide `state`.
+- Unicorn is faster when the next state does not depend on input. Use symbolic execution only for blocks whose next state does.
 
-### 4.1 Linux Anti-Analysis & Bypass Recipes
+---
 
-| Detection Vector | Mechanism / Trigger | Bypass Countermeasure | Evidence ID |
+## 7. Virtualization Protectors (VMProtect, Themida/WinLicense, Code Virtualizer)
+
+### Recognize
+| Protector | Signs |
+|---|---|
+| VMProtect 3.x | Sections `.vmp0`, `.vmp1` (renamable). VM entry is `push <imm32>; call <vm_entry>` where the immediate is the encrypted bytecode pointer. Entry saves all GPRs and flags. Mutated junk around every handler. Imports resolved through stubs. |
+| Themida / WinLicense | Sections `.themida` / `.winlice` (or blank names). Large mutated entry, multiple VM architectures (FISH, TIGER, SHARK, PUMA, ...), heavy anti-debug before OEP. |
+| Code Virtualizer | Same vendor as Themida. VM only, no packer. |
+
+### Approach
+1. Decide whether you need the VM at all. Most questions are answered at the API boundary (section 0) or by an OEP dump with fixed imports.
+2. Find VM entries: all `push imm; call X` sites with the same `X`, or calls into the VM section from normal code.
+3. Find the dispatcher: the block that fetches from the virtual instruction pointer, decodes (XOR/ADD/ROL with a rolling key), and jumps through a table or a computed `jmp reg`/`ret`.
+4. Classify handlers by effect on the virtual stack and context: arithmetic (`vadd`, `vnand`/`vnor` from which all logic is built), loads/stores, push/pop of virtual registers, branch, VM exit.
+5. Lift a trace or the handlers to an IR (VTIL, LLVM IR, Triton AST), optimize (stack-to-register, dead code, MBA), and decompile the result.
+6. Verify: run the lifted code and the original on the same inputs in the lab and compare outputs.
+
+| Tool | Target | Usage | Notes |
 |---|---|---|---|
-| **ptrace Self-Attach** | `ptrace(PTRACE_TRACEME, 0, 1, 0)` returns `-1` if debugger attached. | Preload hook or patch syscall to return `0`: `LD_PRELOAD=./hook_ptrace.so`. | `E-anti-debug-ptrace` |
-| **Double ptrace Fork** | Parent forks child; child attaches to parent to prevent external GDB attachment. | Intercept `fork()` via GDB: `set follow-fork-mode child`, or patch `PTRACE_ATTACH` call. | `E-anti-debug-doubleptrace` |
-| **TracerPid Inspection**| Reads `/proc/self/status`, parses `TracerPid:` (non-zero indicates tracer). | Mount fake `/proc` filesystem or hook `read()` / `open()` to substitute `TracerPid:\t0\n`. | `E-anti-debug-tracerpid` |
-| **wchan Kernel Wait** | Reads `/proc/self/wchan`; string `ptrace_stop` confirms debugger pause. | Hook `open` / `read` syscalls for `wchan` path to return `sys_poll` or `0`. | `E-anti-debug-wchan` |
-| **RDTSC Timing Check** | Executes `rdtsc` before and after instructions; delta exceeding threshold indicates tracing. | Set Hardware Breakpoint directly past comparison, zero out delta register, or patch `cmp` / `jge`. | `E-anti-debug-rdtsc` |
-| **Signal Trapping** | Issues `raise(SIGTRAP)` or triggers deliberate `SIGSEGV`; registers handler to execute code. | In GDB: Configure signal forwarding: `handle SIGTRAP nostop noprint pass`. | `E-anti-debug-signal` |
+| NoVmp (`can1357/NoVmp`) | VMProtect 3.0–3.5 x64 | `NoVmp.exe dumped.exe [-vms 0x729B81 ...] [-sections .xxx0] [-base 0x140000000] [-opt:constant]` | Static, built on VTIL. Needs an unpacked dump. |
+| titan (`archercreat/titan`) | VMProtect < 3.8 | `titan -i intrinsics/vmprotect64.ll -b "$BIN" -e 0x140103FF4` | Triton + LLVM. Emulates handlers. |
+| Mergen (`NaC-L/Mergen`) | VMProtect 3.4–3.6, 3.8.1; Themida example | `lifter "$BIN" 0x<vm_entry>` | Lifts to LLVM IR |
+| themida-unmutate (`pip install themida-unmutate`) | Themida 3.x mutation (tested to 3.1.9) | `themida-unmutate -a 0x<addr> -o out.exe "$BIN"` | Static. Binary Ninja plugin `themida-unmutate-bn`. |
+| unlicense (`ergrelet/unlicense`) | Themida/WinLicense 2.x/3.x unpack | `unlicense.exe "$BIN" [--pause_on_oep] [--force_oep=<RVA>]` | **Executes the target.** Lab VM only. 32-bit Python for 32-bit targets. |
+| vmpdump (`0xnobody/vmpdump`) | VMProtect 3.x x64 dump + import fix | `VMPDump.exe <PID> "<module>" [-ep=<RVA>]` | Live process. Lab VM only. |
+| VMPImportFixer (`mike1k/VMPImportFixer`) | VMProtect import stubs | `-p <pid or name> -mod:<module> -section:<vmp section>` | Live process. Lab VM only. |
 
-### 4.2 Windows Anti-Analysis & Bypass Recipes
+Each tool targets a version range. A protector update breaks them silently. When a lift produces nonsense, fall back to trace-based handler classification or to behavior recovery by fuzzing.
 
-| Detection Vector | Mechanism / Trigger | Bypass Countermeasure | Evidence ID |
-|---|---|---|---|
-| **PEB Flags** | `PEB.BeingDebugged` (offset `0x02`), `NtGlobalFlag` (`0x68`/`0xBC` = `0x70`), `HeapFlags`. | In x64dbg: Use ScyllaHide plugin. Manual GDB: `set *(char*)(PEB + 2) = 0`, `set *(int*)(PEB + 0x68) = 0`. | `E-anti-debug-peb` |
-| **NtQueryInformationProcess** | Calls `NtQueryInformationProcess` with classes `ProcessDebugPort` (7), `ProcessDebugFlags` (0x1F), or `ProcessDebugObjectHandle` (0x1E). | Hook API via ScyllaHide or Frida: Force `ReturnLength = 0`, `DebugPort = 0`, `DebugFlags = 1`. | `E-anti-debug-ntqip` |
-| **ThreadHideFromDebugger** | Calls `NtSetInformationThread(ThreadHandle, 0x11, 0, 0)` to detach thread from debugger. | Hook `NtSetInformationThread`; when `ThreadInformationClass == 0x11`, return `STATUS_SUCCESS` without invoking kernel. | `E-anti-debug-thide` |
-| **Hardware Breakpoints** | Inspects `CONTEXT.Dr0-Dr3` via `GetThreadContext` or SEH/VEH exception records. | In debugger: Hide hardware debug registers via ScyllaHide hook on `GetThreadContext` / `NtGetContextThread`. | `E-anti-debug-hwbp` |
-| **Software Breakpoints** | Scans memory sections for `0xCC` (`int 3`) bytes or verifies CRC32 of `.text`. | Use Hardware Breakpoints exclusively (`ba e 1 <addr>`); do not insert `0xCC` breakpoints into scanned sections. | `E-anti-debug-swbp` |
-| **VEH / SEH Abuse** | Registers exception handler (`AddVectoredExceptionHandler`), forces `int 3` or invalid page access, executes in handler. | Step into the exception dispatcher; set breakpoint at registered VEH handler address instead of swallowing exception. | `E-anti-debug-veh` |
+---
 
-### 4.3 Anti-VM & Hypervisor Detection
+## 8. Anti-Analysis Catalog
 
-| Detection Vector | Mechanism / Target Artifacts | Bypass Countermeasure | Evidence ID |
-|---|---|---|---|
-| **CPUID Hypervisor Bit**| Leaf `0x1`: ECX bit 31 set (`1` = Hypervisor present). | In QEMU: Add `-cpu host,-hypervisor`. In x64dbg: Enable ScyllaHide CPUID hook. | `E-anti-vm-cpuid` |
-| **Vendor String Leaf** | Leaf `0x40000000`: Returns strings `"VMwareVMware"`, `"Microsoft Hv"`, `"KVMKVMKVM"`. | Hook CPUID instructions in hypervisor to return authentic `"GenuineIntel"` or `"AuthenticAMD"`. | `E-anti-vm-vendor` |
-| **MAC Address OUIs** | Checks network interface MAC prefixes: `00:05:69`, `00:0C:29`, `00:50:56` (VMware); `08:00:27` (VirtualBox). | Change virtual NIC MAC address to standard physical vendor OUI (e.g., `3C:D9:2B` HP/Intel). | `E-anti-vm-mac` |
-| **Resource Starvation** | Queries cores (`<4`), RAM (`<4GB`), disk size (`<60GB`), mouse movement/tick count. | Provision analysis VM with 4+ vCPUs, 8GB+ RAM, 120GB+ disk image. Run synthetic mouse/cursor simulation script. | `E-anti-vm-resources` |
+Static first: find the check by its API, syscall number, string, or constant, then decide whether it matters for the question. Patching it in a copy is often enough. Bypasses that run the sample are lab-only.
 
-### 4.4 Anti-Dynamic Binary Instrumentation (Anti-DBI / Frida)
+### Windows
+| Check | How it reads | Bypass |
+|---|---|---|
+| `IsDebuggerPresent` / `PEB.BeingDebugged` | PEB at `gs:[0x60]` (x64) / `fs:[0x30]` (x86). Byte at `+0x02`. | Zero the byte. ScyllaHide does it. |
+| `PEB.NtGlobalFlag` | `+0xBC` (x64) / `+0x68` (x86). `0x70` = heap debug flags set when launched by a debugger. | Zero it, or attach instead of launching. |
+| Heap flags | `ProcessHeap` at PEB `+0x30`/`+0x18`. `Flags` `+0x70`/`+0x40` should be 2. `ForceFlags` `+0x74`/`+0x44` should be 0. | Attach after start, or patch. ScyllaHide covers it. |
+| `CheckRemoteDebuggerPresent` / `NtQueryInformationProcess` | Classes `ProcessDebugPort` (7, returns -1), `ProcessDebugObjectHandle` (0x1E), `ProcessDebugFlags` (0x1F, returns 0 under a debugger) | Hook `NtQueryInformationProcess`: port 0, handle NULL with `STATUS_PORT_NOT_SET`, flags 1. |
+| `NtSetInformationThread(h, ThreadHideFromDebugger=0x11)` | Debugger stops receiving events from the thread | Hook and return success without the syscall. |
+| `NtQuerySystemInformation(SystemKernelDebuggerInformation=0x23)`, `KUSER_SHARED_DATA.KdDebuggerEnabled` (`0x7FFE02D4`) | Kernel debugger present | Patch the result. Do not kernel-debug the analysis VM with protected samples. |
+| Hardware breakpoints | `GetThreadContext` / exception context `Dr0`–`Dr7` | Hide debug registers (ScyllaHide `NtGetContextThread`). |
+| Software breakpoints / integrity | Scan for `0xCC`, CRC of `.text` | Hardware breakpoints only, or break outside the checked range. |
+| `CloseHandle(invalid)` / `NtClose` | Raises `EXCEPTION_INVALID_HANDLE` only under a debugger | Pass the exception to the program. |
+| Exceptions as control flow | `int 3`, `int 2d`, `ud2`, VEH/SEH handlers that do the real work | Pass exceptions to the program. Break inside the registered handler. |
+| TLS callbacks | Run before the entry point | Read `IMAGE_DIRECTORY_ENTRY_TLS` statically. Break there, not at `main`. |
+| Anti-attach | Patched `DbgUiRemoteBreakin` / `DbgBreakPoint` in ntdll | Restore the original bytes from disk. |
+| Parent / windows / processes | Parent is not `explorer.exe`; `FindWindow` for debugger classes; process names | Rename tools, launch from Explorer. |
+| Timing | `rdtsc`, `QueryPerformanceCounter`, `GetTickCount64` deltas | Patch the compare. Do not single-step through the measured region. |
 
-| Detection Vector | Mechanism / Trigger | Bypass Countermeasure | Evidence ID |
-|---|---|---|---|
-| **Frida Port Scan** | Connects to `127.0.0.1:27042` to detect active `frida-server`. | Launch `frida-server` on custom randomized port: `./frida-server -l 0.0.0.0:41921`. | `E-anti-dbi-port` |
-| **Named Pipes Scan** | Windows/Android scans for named pipes matching `\pipe\frida-*` or `/data/local/tmp/frida-*`. | Patch Frida binary to rename default pipe prefix, or deploy custom GumJS inject library. | `E-anti-dbi-pipe` |
-| **Memory Map Scanning**| Scans `/proc/self/maps` for strings `"frida"`, `"gadget"`, `"gum-js-loop"`, or executable anonymous pages. | Hook `open` / `read` on `/proc/self/maps` using Frida itself (early spawn) to filter out strings. | `E-anti-dbi-maps` |
-| **Inline Trampoline Scan**| Inspects function prologues for hooked trampolines: `jmp <remote>` or `ldr x16, ...; br x16`. | Use hardware breakpoints for instrumentation, or use Frida Stalker (instruction tracing) instead of inline interception. | `E-anti-dbi-trampoline` |
+### Linux
+| Check | How it reads | Bypass |
+|---|---|---|
+| `ptrace(PTRACE_TRACEME)` | Returns -1 (`EPERM`) when already traced | `LD_PRELOAD` hook only works for the libc wrapper. A raw `syscall` (nr 101 x86_64, 117 arm64) needs a patch, or gdb `catch syscall ptrace` then `set $rax = 0` on return. |
+| Self-attach / fork-and-attach | Child `PTRACE_ATTACH`es the parent so nobody else can | Patch the fork path. Debug the child with `set follow-fork-mode child`. |
+| `/proc/self/status` `TracerPid` | Non-zero means traced | Hook `open`/`read` for that path, or patch the parser. |
+| `/proc/self/stat` state, `/proc/self/wchan` | `t` (tracing stop), `ptrace_stop` | Same as above. |
+| Parent name | `/proc/<ppid>/cmdline` contains `gdb`, `strace`, `ltrace` | Launch through a neutral wrapper. |
+| `prctl(PR_SET_DUMPABLE, 0)` | Blocks non-root attach and core dumps | Patch, or trace as root. |
+| `LD_PRELOAD` / `/etc/ld.so.preload` checks | Detects injection | Use a debugger or Frida spawn instead of preload. |
+| `SIGTRAP` self-signal | `raise(SIGTRAP)` / `int3` with a handler doing real work | gdb: `handle SIGTRAP nostop noprint pass`. |
+| Timing | `rdtsc`, `clock_gettime` | Patch the compare. |
+
+### macOS / iOS
+| Check | How it reads | Bypass |
+|---|---|---|
+| `ptrace(PT_DENY_ATTACH=31)` | Debugger cannot attach; an attached one kills the process. Often inlined as `svc #0x80` with `x16 = 26`. | Break on the `ptrace`/syscall site and skip it, or patch the immediate. |
+| `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID)` | `kinfo_proc.kp_proc.p_flag & P_TRACED (0x800)` | Hook `sysctl` and clear the bit. |
+| `task_get_exception_ports` | Debugger installs exception ports | Hook and return an empty set. |
+| `csops(pid, CS_OPS_STATUS)` | `CS_DEBUGGED (0x10000000)` | Hook `csops`. |
+| `getppid() != 1` | Not launched by launchd | Launch via `open` / launchd. |
+| Jailbreak / injection | Paths (`/Applications/Cydia.app`, `/var/jb`), `DYLD_INSERT_LIBRARIES`, `_dyld_get_image_name` scan | Hook the file APIs and the image list in the lab. |
+
+### Android
+| Check | How it reads | Bypass |
+|---|---|---|
+| Java debugger | `Debug.isDebuggerConnected()`, `ApplicationInfo.FLAG_DEBUGGABLE` | Hook the Java method. |
+| Native tracer | `TracerPid`, `ptrace(PTRACE_TRACEME)` in `JNI_OnLoad` or `.init_array` | Hook early (spawn mode) or patch the library. |
+| Frida server | Connect to `127.0.0.1:27042`, D-Bus `AUTH` probe on open ports | Run the server on another port: `frida-server -l 0.0.0.0:41921`, then `frida -H 127.0.0.1:41921`. |
+| Frida in-process | `/proc/self/maps` contains `frida-agent` / `frida-gadget`; thread names in `/proc/self/task/*/comm` (`gum-js-loop`, `gmain`, `gdbus`, `pool-frida`); named pipes / sockets with `frida` | Hook the `open`/`read` of those paths, or use a renamed Frida build. Detection often runs in its own thread: find it via `pthread_create` callers. |
+| Inline hook detection | Compare libc prologues in memory with the file on disk | Hook later, below the checked function, or use hardware breakpoints. |
+| Root / emulator | `su` paths, Magisk files, `ro.debuggable`, `ro.kernel.qemu`, build fingerprint | Out of scope for the logic. Hook or patch in the lab. |
+
+### Anti-VM / Sandbox
+| Check | Detail | Countermeasure |
+|---|---|---|
+| CPUID leaf 1, ECX bit 31 | Hypervisor present | QEMU/KVM `-cpu host,-hypervisor,kvm=off`. VMware `.vmx`: `hypervisor.cpuid.v0 = "FALSE"`. |
+| CPUID leaf `0x40000000` | `VMwareVMware`, `Microsoft Hv`, `KVMKVMKVM`, `VBoxVBoxVBox`, `XenVMMXenVMM`, `TCGTCGTCGTCG` | Same settings. Hiding the leaf is a hypervisor config, not a guest patch. |
+| VMware backdoor | `in eax, dx` with `EAX = 0x564D5868` (`VMXh`), `DX = 0x5658` | `.vmx`: `monitor_control.restrict_backdoor = "TRUE"` (breaks VMware Tools). |
+| MAC OUI | VMware `00:05:69`, `00:0C:29`, `00:1C:14`, `00:50:56`; VirtualBox `08:00:27`; Hyper-V `00:15:5D`; QEMU `52:54:00` | Set a physical-vendor MAC. |
+| Firmware / drivers / services | SMBIOS strings (`VMware`, `VBOX`, `QEMU`), `VBoxGuest.sys`, `vmtoolsd.exe`, `vmci.sys`, registry `HARDWARE\DESCRIPTION\System\BIOS` | Edit SMBIOS strings in the hypervisor config; skip guest tools in the detonation VM. |
+| Resources and activity | < 4 CPUs, < 4 GB RAM, < 60 GB disk, no recent files, no mouse movement, short uptime | Size the VM realistically. Age the image. |
+
+When a sample exits early with no visible check, diff the trace of the lab run against a run on a hardened VM. The first divergent API call is usually the check.
+
+---
+
+## 9. Verify
+- After deflattening: every relevant block has the successors the algorithm derived, and the function returns on the same inputs (emulate it with fixed inputs before and after).
+- After MBA simplification: Z3 proves the old and new expressions equal at the real bit width.
+- After an opaque-predicate patch: Z3 proves the condition constant, and no code writes the globals it reads.
+- After a VM lift: outputs match the original on at least a handful of inputs.
+- After an anti-debug bypass: the program reaches the same code with and without the debugger.
+
+## 10. Boundaries And Anti-Patterns
+- Do not trust a deobfuscator's output without one of the checks above. A wrong patch looks like clean code.
+- Do not run full-function symbolic exploration on flattened code.
+- Do not apply OLLVM tools to a VM-protected function. Flattening removal does nothing to a bytecode interpreter.
+- Do not use cloud deobfuscation services on confidential samples.
+- Do not run unpackers that execute the target (unlicense, vmpdump, VMPImportFixer) outside the lab VM.
+- Removing a license check to avoid paying is out of scope. Documenting how it works is in scope.

@@ -14,6 +14,7 @@ kernel-ranchu.orig; writing to a physical device is forbidden.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import platform
@@ -24,7 +25,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict, get_args
 
 IOS_UNSUPPORTED = "iOS tooling runs on macOS only"
 COLD_BOOT = (
@@ -212,13 +213,6 @@ class Report(TypedDict):
 
 
 @dataclass
-class Cli:
-    install: Profile | None
-    probe_android: bool
-    error: str | None = None
-
-
-@dataclass
 class ApplyResult:
     installed: list[InstalledItem] = field(default_factory=list)
     skipped: list[SkipItem] = field(default_factory=list)
@@ -230,63 +224,17 @@ def emit(payload: Report) -> None:
     sys.stdout.write("\n")
 
 
-def emit_error(message: str) -> None:
-    json.dump({"error": message}, sys.stdout)
-    sys.stdout.write("\n")
-
-
-def as_profile(value: str) -> Profile | None:
-    if value == "static":
-        return "static"
-    if value == "dynamic":
-        return "dynamic"
-    if value == "android":
-        return "android"
-    if value == "ios":
-        return "ios"
-    return None
-
-
-def parse_cli(argv: list[str]) -> Cli:
-    cli = Cli(install=None, probe_android=False)
-    index = 0
-    while index < len(argv):
-        arg = argv[index]
-        if arg == "--probe-android":
-            cli.probe_android = True
-            index += 1
-            continue
-        if arg in {"--help", "-h"}:
-            cli.error = (
-                "usage: uv run scripts/detect_host.py [--probe-android] "
-                "[--install static|dynamic|android|ios]"
-            )
-            return cli
-        profile_text: str | None = None
-        if arg == "--install":
-            if index + 1 >= len(argv):
-                cli.error = "--install requires one profile: static, dynamic, android, or ios"
-                return cli
-            profile_text = argv[index + 1]
-            index += 2
-        elif arg.startswith("--install="):
-            profile_text = arg.split("=", 1)[1]
-            index += 1
-        else:
-            cli.error = f"unrecognized argument: {arg}"
-            return cli
-        if cli.install is not None:
-            cli.error = "--install accepts only one profile"
-            return cli
-        if profile_text is None:
-            cli.error = "--install requires one profile: static, dynamic, android, or ios"
-            return cli
-        profile = as_profile(profile_text)
-        if profile is None:
-            cli.error = "--install requires one profile: static, dynamic, android, or ios"
-            return cli
-        cli.install = profile
-    return cli
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Detect this host; install one allowlisted profile only with --install.",
+    )
+    parser.add_argument("--probe-android", action="store_true", help="also query adb/emulator state")
+    parser.add_argument(
+        "--install",
+        choices=get_args(Profile),
+        help="install the missing tools of one profile",
+    )
+    return parser
 
 
 def run_cmd(
@@ -934,11 +882,7 @@ def install_profile(profile: Profile, report: Report) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    cli = parse_cli(args)
-    if cli.error is not None:
-        emit_error(cli.error)
-        return 1
+    cli = build_parser().parse_args(argv)
     report = detect(cli.probe_android)
     if cli.install is None:
         emit(report)

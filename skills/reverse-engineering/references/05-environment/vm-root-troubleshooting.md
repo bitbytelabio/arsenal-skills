@@ -1,308 +1,125 @@
-# Android/iOS VM Root Setup Troubleshooting
+# Rooted Android Emulator and iOS VM Troubleshooting
 
-Use this reference when Android emulator rooting or an iOS `vphone-cli`
-research VM fails during host preflight, firmware preparation, custom-firmware
-installation, guest bootstrap, or setup-script type checking. Match the exact
-symptom before applying a fix; the failures below occur at different privilege
-and storage layers.
+Match the exact symptom before retrying a privileged step. Setup procedures: [host-and-lab-setup.md](host-and-lab-setup.md) sections 3-6.
 
-## 1. macOS AMFI refuses `vphone-vm`
+## A. Android emulator (KernelSU)
 
-### Symptom
+| Symptom | Cause | Fix |
+|---|---|---|
+| `adb shell su -c id` → `su: not found` right after `patch-kernel` | Emulator resumed a Quick Boot snapshot with the stock kernel | `uv run scripts/setup_android_emulator.py cold-boot --avd "$AVD"` (`-no-snapshot-load`); confirm `adb shell uname -r` changed |
+| Bootloop or black screen after patch | AnyKernel3 zip for another GKI branch (`android15-6.6` vs `android16-6.12`) | `cp kernel-ranchu.orig kernel-ranchu`; `download --kernel-version "$(adb shell uname -r \| tr -d '\r')"`; `patch-kernel` |
+| Manager shows "Not installed" | Kernel not replaced, or wrong system image directory patched (several AVDs, `_ps16k` variant) | `uv run scripts/detect_host.py` lists every `kernel-ranchu`; pass `--system-image-path` explicitly |
+| `su` works in the manager, `verify-root` fails from `adb shell` | Shell not granted root, or KernelSU-Next **Umount modules** hides `su` for that uid | Manager > Superuser > Shell: allow; disable Umount modules for Shell (or the global default) |
+| `adb root` → `adbd cannot run as root in production builds` | Play Store image is a `user` build | Use `su -c` |
+| `adb remount` fails, `-writable-system` ignored | Play Store images do not support writable system | Use a KernelSU module or tmpfs/bind mounts |
+| Zygisk-based module (LSPosed, Zygisk-Il2CppDumper, Shamiko-style) inactive | KernelSU has no Zygisk | Install Zygisk Next (or ReZygisk) module, reboot, then the dependent module |
+| Module installed, files not visible to the app | Umount modules on for that app (by design), or module mounted after the app started | Disable umount for the app or force-stop and relaunch it |
+| No Play Store icon | `PlayStore.enabled=false` in the AVD `config.ini` | `create-avd` sets it; or edit `config.ini` and cold boot |
+| Patch lost after an SDK update | `sdkmanager` replaced the system image | `patch-kernel` again |
+| Assets downloaded to an unexpected place | Cache resolves to `$ANDROID_KSU_CACHE_DIR`, else `~/.cache/android-ksu` | Set the variable or pass `--download-dir` |
 
-`vphone-cli host preflight` fails before any guest can start:
+## B. Android system CA (mitmproxy)
 
-```text
-Error: amfid refused to launch vphone-vm, so no guest could start. Binary: .../vphone-vm. CDHash: ...
-```
+| Symptom | Cause | Fix |
+|---|---|---|
+| CA listed under user credentials, apps still fail TLS | API 24+ apps ignore user CAs | Install as system CA: `uv run scripts/setup_proxy_ca.py install-android` |
+| Cert in `/system/etc/security/cacerts`, Android 14+ apps still fail | Android 14 reads `/apex/com.android.conscrypt/cacerts` (Conscrypt APEX, updatable) | Bind a tmpfs copy over the APEX path in init, `zygote`/`zygote64`, and each app namespace with `nsenter --mount=/proc/<pid>/ns/mnt`. `install-android` does this when the APEX dir exists |
+| APEX bind works for new apps only | Running apps keep their old mount namespace | `adb shell am force-stop <pkg>` and relaunch, or re-run `install-android` |
+| Interception stops after reboot | APEX bind mount and tmpfs are not persistent | Re-run `install-android` after each boot |
+| `install-android` → "su or remount failed" | No root, or `su` hidden from Shell | Fix root first (table A) |
+| Wrong filename | Used the new subject hash | Use `openssl x509 -subject_hash_old` (`c8750f0d.0` for the default mitmproxy CA) |
+| System CA in place, one app still fails | Certificate pinning, or Flutter/Cronet/BoringSSL ignoring the store | `export-frida-scripts`; for Flutter see [../01-static-architectures/flutter-dart.md](../01-static-architectures/flutter-dart.md) |
+| No traffic reaches mitmproxy | Proxy not set or app ignores system proxy | `set-android-proxy --host 10.0.2.2 --port 8080`; for proxy-unaware apps use transparent mode or `iptables` redirect |
 
-### Technical root cause
+## C. iOS `vphone-cli` VM
 
-On macOS 15 and later, `Virtualization.framework` does not let an ordinary,
-retail-policy process use the private PV=3 virtualization entitlements needed
-by iOS Private Cloud Compute (PCC) research guests. The binary can be correctly
-built and signed while AMFI (`amfid`) still rejects it: the host has not enabled
-the research-guest policy and the specific `vphone-vm` CDHash has not been
-allowed by `VPhoneEscalator`. A quarantine attribute on the downloaded bundle
-can independently keep Gatekeeper/AMFI from accepting the build.
+`vphone-cli` is the public [Lakr233/vphone-cli](https://github.com/Lakr233/vphone-cli) project. Its own guide: `Documents/Guides/troubleshooting.md`.
 
-### Verified fix
+### iOS-1. AMFI refuses `vphone-vm`
 
-1. Shut down the Mac, hold the power button to enter **macOS Recovery**, open a
-   Recovery terminal, and enable the research-guest policy:
+Symptom: `vphone-cli host preflight` reports that amfid refused to launch `vphone-vm`, or `vphone-vm` is killed before the window opens.
 
-   ```bash
-   csrutil allow-research-guests enable
-   ```
+Cause: `vphone-vm` carries private PV=3 virtualization entitlements. AMFI rejects it unless the host allows research guests and the exact `vphone-vm` cdhash is allowlisted. Every rebuild changes the cdhash. A quarantine attribute on a downloaded bundle can also block it.
 
-   On systems where that subcommand is unavailable, use the supported debug
-   policy form instead:
-
+Fix:
+1. macOS Recovery Terminal (both commands, or `csrutil disable` plus `amfi_get_out_of_my_way=1` boot-arg):
    ```bash
    csrutil enable --without debug
+   csrutil allow-research-guests enable
    ```
-
-   Reboot into the normal host OS.
-
-2. On the host, authorize the exact VM helper binary that preflight reported:
-
+2. Back in macOS, allowlist the current build:
    ```bash
-   sudo /path/to/VPhoneEscalator allow /path/to/vphone-vm
+   bundle=.build/XcodeBundle/Build/Products/Debug/VPhone.bundle
+   sudo xattr -dr com.apple.quarantine "$bundle"
+   sudo "$bundle/Contents/MacOS/vphone-escalator" allow "$bundle/Contents/MacOS/vphone-vm"
+   "$bundle/Contents/MacOS/vphone-escalator" status
+   "$bundle/Contents/MacOS/vphone-cli" host preflight
    ```
+3. Repeat `allow` after every build. For a distributed bundle, the preflight error prints the exact `vphone-escalator allow` command.
 
-3. Remove quarantine recursively from the containing bundle:
+`Virtualization is not available on this hardware` means the host is itself a VM. PV=3 guests cannot nest.
 
-   ```bash
-   sudo xattr -r -d com.apple.quarantine /path/to/VPhone.bundle
-   ```
+### iOS-2. CFW installation needs root
 
-4. Re-run `vphone-cli host preflight`. Success means the same `vphone-vm`
-   binary can now launch; authorizing a different build path or a stale CDHash
-   does not fix the active binary.
+Symptom: `vphone-cli vm create` stops at the CFW step with `CFW installation needs root. Run this command with sudo.`
 
-## 2. Custom-firmware installation needs host root
+Cause: `cfw install` mounts the guest APFS volume on the host and writes `vphoned` and the hooks into it.
 
-### Symptom
-
-`vphone-cli vm create` reaches step 4 and stops with:
-
-```text
-Error: CFW installation needs root. Run this command with sudo.
-```
-
-### Technical root cause
-
-Step 4 runs `cfw install`. This is not merely a guest-side file copy: it mounts
-the VM's APFS container on host macOS through `/sbin/mount_apfs`, then injects
-the jailbreak components `SystemHook`, `launchdhook`, and `vphoned`. Mounting
-and modifying that host-visible APFS volume requires macOS administrator
-privileges even when all VM files belong to the current user.
-
-### Verified fix
-
-Re-run only the custom-firmware installation with host privileges and preserve
-the original user's machine library explicitly:
+Fix: re-run only that step as root and keep the user's machine library:
 
 ```bash
-sudo vphone-cli cfw install <vm_name> \
-  --library-root "$HOME/.vphone/machines"
+sudo vphone-cli cfw install "$VM_NAME" --library-root "$HOME/.vphone/machines"
 ```
 
-The invoking shell expands `$HOME` before `sudo` starts the command. Without
-`--library-root`, the elevated process resolves its home as `/var/root` and
-looks in `/var/root/.vphone/machines`, not in the user's existing VM library.
+The shell expands `$HOME` before `sudo`. Without `--library-root`, root looks in `/var/root/.vphone/machines`.
 
-## 3. Re-running `cfw install` cannot find a prepared restore tree
+### iOS-3. `cfw install` cannot find the restore tree
 
-### Symptom
+Symptom: `No prepared iPhone restore tree exists in .../<vm_name>`.
 
-An isolated retry of `cfw install` fails with:
+Cause: without `--keep-artifacts`, the restore tree (`iPhone17,3_..._Restore`, with `iPhone-BuildManifest.plist` and Cryptexes) is deleted after the DFU restore. Template builds always delete it.
 
-```text
-Error: No prepared iPhone restore tree exists in .../<vm_name>
-```
-
-### Technical root cause
-
-Firmware preparation creates a restore tree named like
-`iPhone17,3_..._Restore`. `cfw install` needs that tree's
-`iPhone-BuildManifest.plist` and Cryptex files. Unless the original workflow
-used `--keep-artifacts`, the DFU restore step prunes the tree after it consumes
-it. The VM and `Disk.img` can therefore still exist while the inputs required
-for a later standalone custom-firmware install no longer do.
-
-### Verified fix
-
-Recreate and patch the restore tree from the already cached firmware sources:
+Fix: rebuild it from the cached IPSWs, then retry iOS-2:
 
 ```bash
-vphone-cli fw prepare <vm_name> \
-  --iphone-source /path/to/.ipsw-cache/<iphone-firmware>.ipsw \
-  --cloudos-source /path/to/.ipsw-cache/<cloudos-firmware>.ipsw
-
-vphone-cli fw patch <vm_name>
+vphone-cli fw prepare "$VM_NAME" \
+  --iphone-source /path/to/iPhone17,3_Restore.ipsw \
+  --cloudos-source /path/to/cloudOS.ipsw
+vphone-cli fw patch "$VM_NAME"
 ```
 
-Then retry the privileged `cfw install` command from issue 2. Pointing
-`--iphone-source` and `--cloudos-source` at the local `.ipsw-cache/` artifacts
-avoids another internet download; preparation from those cached IPSWs normally
-finishes in seconds. For a future create flow that must support isolated
-retries, retain the restore tree with `--keep-artifacts`.
+For retries later, create with `--keep-artifacts --no-template`.
 
-## 4. APFS cleanup reports `Resource busy`
+### iOS-4. APFS cleanup `Resource busy`
 
-### Symptom
+Symptom: `umount(.../system): Resource busy -- try 'diskutil unmount'`.
 
-Custom-firmware cleanup reports an error such as:
+Cause: Spotlight (`mds`), QuickLook, or Finder opened the freshly mounted guest volume.
 
-```text
-umount(.../system): Resource busy -- try 'diskutil unmount'
-```
-
-### Technical root cause
-
-The installer has mounted the VM's APFS system volume into the host namespace.
-macOS background processes—notably Spotlight (`mds`), QuickLook, or Finder—can
-open the new mount briefly. A normal unmount then receives `EBUSY` even after
-the firmware injector itself has closed its files.
-
-### Verified fix
-
-`VPhoneCustomFirmwareInstaller.swift` must keep cleanup in its `defer` block and
-fall back to force operations for both layers:
+Fix:
 
 ```bash
-/sbin/umount -f <system-mount-point>
-hdiutil detach -force <attached-disk-device>
+mount | grep -i vphone                 # find the mount point and /dev/diskN
+sudo umount -f <mount-point>
+hdiutil detach -force /dev/diskN
 ```
 
-Do not leave either the APFS mount or its disk image attachment behind after a
-failed normal unmount. After cleanup, verify the custom-firmware snapshot state
-with:
+Add the machine library to Spotlight privacy (System Settings > Spotlight > Search Privacy) to avoid it.
 
-```bash
-vphone-cli cfw flip-snapshot /path/to/<vm_name>/Disk.img
-```
+### iOS-5. Bootstrap fails with `NSCocoaErrorDomain Code=642`
 
-The resulting `Disk.img` must contain the expected renamed original snapshot,
-`orig-fs.disabled.rn-`. Treat the unmount warning and the snapshot state as
-separate checks: force cleanup releases the host resource, while the snapshot
-rename determines which filesystem snapshot the VM will boot.
+Symptom: **Install Bootstrap** reports Code 642. The bootstrap app icon stays but crashes on launch.
 
-## 5. Upstream `vphoned` marker bug returns Code 642 and breaks Irisin
+Cause: older `vphoned` builds wrote the completion marker beside `/usr/bin/vphoned` on the sealed read-only system volume (`NSFileWriteVolumeReadOnlyError`). The rollback then deleted the freshly extracted app binaries.
 
-### Symptom
+Fix: update the bundle. Current `vphoned` writes the marker to `/private/var/db/vphoned/bootstrap.json` and only reads the legacy path. Reconnect the guest; `vphone-vm` updates `vphoned` on connect. Then run Install Bootstrap again.
 
-Selecting **Install Bootstrap** reports:
+### iOS-6. Other
 
-```text
-Install Bootstrap: Error Domain=NSCocoaErrorDomain Code=642. Bootstrap installation failed.
-```
-
-The Irisin icon still appears on the iOS home screen, but tapping it causes an
-immediate crash.
-
-### Technical root cause
-
-The failure is an upstream `vphoned` storage-path bug with a destructive
-rollback side effect:
-
-1. `GuestIrisinInstaller.swift` constructed its completion marker relative to
-   the running executable:
-
-   ```swift
-   Bundle.main.executableURL!
-       .deletingLastPathComponent()
-       .appendingPathComponent(".vphoned-boostrap-completed")
-   ```
-
-2. In vphone 2.0, the executable is `/usr/bin/vphoned`, so that expression
-   resolves the marker inside `/usr/bin`.
-3. `/usr/bin` belongs to the sealed, read-only root filesystem. Creating the
-   marker there throws `NSCocoaErrorDomain Code=642`, which is
-   `NSFileWriteVolumeReadOnlyError`.
-4. The exception enters the rollback in `GuestIrisinInstaller.swift` (the
-   `catch` block around lines 289–294):
-
-   ```swift
-   for entry in replaced.reversed() {
-       try? FileManager.default.removeItem(at: entry.target)
-   }
-   ```
-
-   This removes the newly extracted `irisin` and `irisind` targets. SpringBoard
-   retains the registered icon, but the app bundle no longer contains its
-   executable, so launching the icon crashes immediately.
-
-### Verified fix
-
-Move the marker to the read-write Data partition:
-
-```swift
-let completionMarker = URL(
-    fileURLWithPath: "/private/var/root/.vphoned-bootstrap-completed"
-)
-```
-
-Rebuild `vphoned` and `VPhone.bundle`, then reconnect the guest. `vphone-vm`
-automatically updates `vphoned` over its HTTP/VSOCK connection. With the marker
-under `/private/var/root`, bootstrap completion no longer raises Code 642, the
-rollback does not run, and the installed `irisin` and `irisind` binaries remain
-in place.
-
-## 6. Pyright treats a reused result as `ColdBootResult`
-
-### Symptom
-
-Pyright reports an assignment error in the emulator setup script:
-
-```text
-Type "dict[str, Any | str | bool]" is not assignable to declared type "ColdBootResult"
-```
-
-### Technical root cause
-
-A declaration such as `res: ColdBootResult` inside one `if` branch of `main()`
-does not create a branch-local variable. Python's function scope means Pyright
-associates the identifier `res` with `ColdBootResult` throughout `main()`.
-Assignments to the same name in another subcommand branch are then checked
-against that annotation, even when those branches return a create-AVD or other
-result shape.
-
-### Verified fix
-
-Define a dedicated `TypedDict` for each subcommand result (including
-`CreateAvdResult`), keep result names distinct, and narrow optional paths before
-passing them to functions that require concrete values:
-
-```python
-create_res: CreateAvdResult = create_avd(...)
-boot_res: ColdBootResult = cold_boot(...)
-
-if def_path and sdk_root:
-    # Both operands are narrowed to Path here.
-    update_avd_definition(def_path, sdk_root)
-```
-
-Do not silence the diagnostic with `Any` or a cast. Distinct names preserve the
-actual return contracts and prevent one branch's annotation from shadowing all
-other subcommand results in the function scope.
-
-## 7. Automation contains personal absolute paths
-
-### Symptom
-
-A setup command works on its author's workstation but fails on another developer
-machine or in CI because it references a path such as:
-
-```text
-/Users/<user>/.../android-ksu
-```
-
-### Technical root cause
-
-The script encoded a workstation-specific username and directory layout rather
-than deriving a user cache directory at runtime. The path is invalid for every
-other account, for non-macOS hosts, and often for sandboxed CI users.
-
-### Verified fix
-
-Use the platform-independent home directory and allow an environment override:
-
-```python
-import os
-from pathlib import Path
-
-cache_dir = Path(
-    os.environ.get(
-        "ANDROID_KSU_CACHE_DIR",
-        str(Path.home() / ".cache" / "android-ksu"),
-    )
-).expanduser()
-```
-
-The default is `~/.cache/android-ksu`; `ANDROID_KSU_CACHE_DIR` supports CI,
-shared caches, or another filesystem without editing source. Apply the same
-rule to related automation: derive paths from `Path.home()`, explicit CLI
-arguments, or documented environment variables, never from a personal
-`/Users/<name>/...` prefix.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `vm create` printed `vphoned connected`, no VM running | Expected: the verification boot is stopped | `vphone-cli vm launch "$VM_NAME"` |
+| Restore or first boot fails | Incompatible iPhone/cloudOS pair, or no network for the restore ticket | Check `Documents/Guides/compatibility.md`; rerun `vm create` with a new name and `-v` |
+| Stuck at "Press home to continue" | No VNC/SSH in the guest | VM window **Keys > Home** |
+| No SSH into the guest | The workflow installs no SSH server | Install one yourself, or drive the guest through `vphoned` (`<VM bundle>/vphone.sock`) |
+| Guest traffic bypasses the host VPN | `nat`/`bridged` leave through the physical NIC | `vphone-cli vm config "$VM_NAME" --network tunnel` (VM stopped) |

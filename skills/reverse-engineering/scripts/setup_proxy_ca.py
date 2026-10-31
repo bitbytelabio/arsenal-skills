@@ -12,6 +12,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
@@ -31,7 +32,14 @@ ANDROID_FRIDA_SCRIPT = r"""/**
  *  - Conscrypt / Android OpenSSL TrustManagerImpl (checkTrustedRecursive, verifyChain)
  *  - android.webkit.WebViewClient (onReceivedSslError handler.proceed)
  *  - android.security.net.config.NetworkSecurityConfig
+ *
+ * Frida 17: the `frida` CLI (-l) bundles the Java bridge. A script loaded through
+ * the Python/Node API or built with frida-compile must import frida-java-bridge.
  */
+
+if (typeof Java === 'undefined') {
+    throw new Error("Java bridge missing: load with `frida -U -f <pkg> -l ssl_unpin_android.js`, or bundle frida-java-bridge (Frida 17+)");
+}
 
 Java.perform(function () {
     console.log("[*] Initializing Universal Android SSL Pinning Bypass...");
@@ -156,8 +164,14 @@ IOS_FRIDA_SCRIPT = r"""/**
 (function () {
     console.log("[*] Initializing Universal iOS SSL Pinning Bypass...");
 
+    // Frida 17 removed the static Module.findExportByName(module, name) form.
+    function findExport(moduleName, exportName) {
+        var mod = Process.findModuleByName(moduleName);
+        return mod === null ? null : mod.findExportByName(exportName);
+    }
+
     // 1. Hook SecTrustEvaluateWithError (iOS 12+)
-    var SecTrustEvaluateWithError = Module.findExportByName("Security", "SecTrustEvaluateWithError");
+    var SecTrustEvaluateWithError = findExport("Security", "SecTrustEvaluateWithError");
     if (SecTrustEvaluateWithError) {
         Interceptor.replace(SecTrustEvaluateWithError, new NativeCallback(function (trust, errorPtr) {
             console.log("[+] SecTrustEvaluateWithError bypassed");
@@ -170,7 +184,7 @@ IOS_FRIDA_SCRIPT = r"""/**
     }
 
     // 2. Hook SecTrustEvaluate (legacy iOS / fallback)
-    var SecTrustEvaluate = Module.findExportByName("Security", "SecTrustEvaluate");
+    var SecTrustEvaluate = findExport("Security", "SecTrustEvaluate");
     if (SecTrustEvaluate) {
         Interceptor.replace(SecTrustEvaluate, new NativeCallback(function (trust, resultPtr) {
             console.log("[+] SecTrustEvaluate bypassed");
@@ -183,7 +197,8 @@ IOS_FRIDA_SCRIPT = r"""/**
     }
 
     // 3. Hook Objective-C frameworks if runtime is available
-    if (ObjC.available) {
+    // Frida 17: ObjC exists only under the `frida` CLI or when frida-objc-bridge is bundled.
+    if (typeof ObjC !== 'undefined' && ObjC.available) {
         // AFNetworking / AFSecurityPolicy
         try {
             if (ObjC.classes.AFSecurityPolicy) {
@@ -438,8 +453,9 @@ def install_android_ca(serial: str | None = None, cert_path: Path | None = None)
         }
 
     hash_file = status["hash_filename"]
-    tmp_out = Path("/tmp") / hash_file
-    exp = export_ca_cert(Path("/tmp"), cert_path)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="re-proxy-ca-"))
+    tmp_out = tmp_dir / hash_file
+    exp = export_ca_cert(tmp_dir, cert_path)
     if not exp["success"]:
         return {
             "success": False,
@@ -517,6 +533,41 @@ def install_android_ca(serial: str | None = None, cert_path: Path | None = None)
         o_run = run_process(base_cmd + ["shell", "su", "-c", overlay_script])
         if o_run.returncode == 0:
             installed_methods.append("tmpfs mount overlay on /system/etc/security/cacerts")
+
+    # 4. Android 14+ reads system CAs from the Conscrypt APEX, not /system.
+    # Bind a tmpfs copy over it in init, zygote, and every running app namespace.
+    # This does not survive a reboot; rerun install-android after each boot.
+    apex = "/apex/com.android.conscrypt/cacerts"
+    has_apex = run_process(base_cmd + ["shell", "su", "-c", f"[ -d {apex} ] && echo yes || echo no"])
+    if "yes" in has_apex.stdout:
+        apex_script = (
+            "set -e; "
+            "S=/data/local/tmp/re-cacerts; rm -rf $S; mkdir -p -m 700 $S; "
+            f"cp {apex}/* $S/; cp /data/local/tmp/{hash_file} $S/; "
+            "mount -t tmpfs tmpfs /system/etc/security/cacerts; "
+            "cp $S/* /system/etc/security/cacerts/; "
+            "chown root:root /system/etc/security/cacerts/*; "
+            "chmod 644 /system/etc/security/cacerts/*; "
+            "chcon u:object_r:system_file:s0 /system/etc/security/cacerts/*; "
+            f"mount --bind /system/etc/security/cacerts {apex}; "
+            "Z=\"$(pidof zygote || true) $(pidof zygote64 || true)\"; "
+            f"for P in $Z; do nsenter --mount=/proc/$P/ns/mnt -- mount --bind /system/etc/security/cacerts {apex}; done; "
+            "for Zp in $Z; do for P in $(ps -o PID= -P $Zp); do "
+            f"nsenter --mount=/proc/$P/ns/mnt -- mount --bind /system/etc/security/cacerts {apex} 2>/dev/null || true; "
+            "done; done; "
+            f"ls {apex}/{hash_file}"
+        )
+        a_run = run_process(base_cmd + ["shell", "su", "-c", apex_script])
+        if a_run.returncode == 0:
+            installed_methods.append(f"Android 14+ APEX bind mount on {apex} (until reboot)")
+        else:
+            apex_error = (a_run.stderr or a_run.stdout).strip()
+            return {
+                "success": False,
+                "action": "install-android",
+                "message": f"Android 14+ detected but the APEX bind mount failed: {apex_error}",
+                "error": apex_error,
+            }
 
     if installed_methods:
         return {

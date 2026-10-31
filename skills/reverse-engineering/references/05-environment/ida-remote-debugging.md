@@ -1,251 +1,215 @@
 # IDA Pro Remote Debugging Reference
 
-Comprehensive guide to configuring IDA Pro remote debugging servers across Linux, Windows, Android, Docker containers, and UTM virtual machines.
+Run the target in Docker, a UTM VM, or an Android emulator. Control it from IDA on the host through an IDA debug server.
 
 ---
 
-## 1. IDA Pro Debug Server Binaries
+## 1. Debug server binaries
 
-IDA Pro bundles standalone debug server binaries inside its installation directory:
-- macOS: `$IDADIR/dbgsrv/` or dynamically under `/Applications/IDA*.app/Contents/MacOS/dbgsrv/`
-- Custom / Linux install: `$IDADIR/dbgsrv/` or `/opt/ida*/dbgsrv/`
-- Windows host: `%IDADIR%\dbgsrv\` or `C:\Program Files\IDA*\dbgsrv\`
+Location:
+- macOS: `/Applications/IDA Professional 9.x.app/Contents/MacOS/dbgsrv/` (or `$IDADIR/dbgsrv/`)
+- Linux: `$IDADIR/dbgsrv/` (e.g. `/opt/ida-pro-9.x/dbgsrv/`)
+- Windows: `%IDADIR%\dbgsrv\`
 
-### Server Binary Architecture Mapping
+`uv run scripts/setup_utm.py ida-server-info` and `setup_vm.py run-playbook` look in `$IDA_DBGSRV`, `$IDADIR`, `$IDA_DIR`, `/Applications/IDA*.app`, `~/Applications/IDA*.app`, then `/opt/ida*/dbgsrv`.
 
-| Binary Name | Target OS | Target CPU Architecture | Typical Use Case |
+IDA 9.4 ships (checked with `file`):
+
+| Binary | OS | Arch | Debugger to select in IDA |
 |---|---|---|---|
-| `linux_server` | Linux | x86_64 (64-bit) | Standard Linux ELF binaries, Docker containers, x64 VMs |
-| `linux_server32` | Linux | x86 (32-bit) | Legacy 32-bit Linux binaries, CTFs |
-| `armlinux_server` | Linux | AArch64 (ARM64 64-bit) | Linux on Apple Silicon UTM, Raspberry Pi, ARM servers |
-| `armlinux_server32` | Linux | ARM (32-bit ARMv7) | Embedded Linux, IoT devices |
-| `armlinux_serverhf32` | Linux | ARM Hard Float (ARMv7 HF) | Embedded Linux with hardware FPU |
-| `win64_remote.exe` | Windows | x86_64 (64-bit) | Modern Windows 64-bit PE binaries, malware triage |
-| `win32_remote32.exe` | Windows | x86 (32-bit) | 32-bit Windows PE binaries |
-| `mac_server` | macOS | x86_64 (64-bit) | Intel macOS binaries |
-| `mac_server_arm` | macOS | ARM64 (Apple Silicon) | Native Apple Silicon Mach-O binaries |
-| `mac_server_arme` | macOS | ARM64e (PAC-enabled) | Apple Silicon binaries utilizing Pointer Authentication |
-| `android_server` | Android | ARM64 / ARMv7 | Android native `.so` shared libraries, JNI reversing |
-| `android_server32` | Android | ARM 32-bit | Legacy 32-bit Android native libraries |
-| `android_x64_server` | Android | x86_64 | Android Studio x86_64 emulator images |
-| `android_x86_server` | Android | x86 | Android Studio 32-bit x86 emulator images |
+| `linux_server` | Linux | x86_64 | Remote Linux debugger |
+| `linux_server32` | Linux | x86 | Remote Linux debugger |
+| `armlinux_server` | Linux | AArch64 | Remote ARM Linux/Android debugger |
+| `armlinux_server32` | Linux | ARMv7 | Remote ARM Linux/Android debugger |
+| `armlinux_serverhf32` | Linux | ARMv7 hard-float | Remote ARM Linux/Android debugger |
+| `win64_remote.exe` | Windows | x64 | Remote Windows debugger |
+| `win32_remote32.exe` | Windows | x86 | Remote Windows debugger |
+| `mac_server` | macOS | x86_64 | Remote Mac OS X debugger |
+| `mac_server_arm` | macOS | arm64 | Remote ARM Mac OS debugger |
+| `mac_server_arme` | macOS | arm64e | Remote ARM Mac OS debugger |
+| `android_server` | Android | arm64 | Remote ARM Linux/Android debugger |
+| `android_server32` | Android | ARM 32-bit | Remote ARM Linux/Android debugger |
+| `android_x64_server` | Android | x86_64 | Remote Linux debugger |
+| `android_x86_server` | Android | x86 | Remote Linux debugger |
+
+There is no `linux_server64` or `armlinux_server64` in IDA 9.x; the unsuffixed name is 64-bit.
+
+Server options (IDA 9.4 `--help`):
+
+| Flag | Meaning |
+|---|---|
+| `-p PORT`, `--port-number` | Listen port (default 23946) |
+| `-i IP`, `--ip-address` | Bind address (default any) |
+| `-P PASS`, `--password` | Session password |
+| `-t`, `--no-tls` | Plain TCP instead of TLS |
+| `-c FILE`, `--certchain-file` / `-k FILE`, `--privkey-file` | TLS certificate and key |
+| `-k`, `--on-broken-connection-keep-session` | Keep the debuggee when the link drops |
+| `-K`, `--on-stop-kill-process` | Kill the debuggee when the session closes |
+| `-v`, `--verbose` | Verbose log |
+
+Use the server from the same IDA version as the client.
 
 ---
 
-## 2. Docker Container Remote Debugging
-
-Debugging binaries inside Docker containers requires mapping ports, granting kernel tracing capabilities, and configuring inter-process communication (IPC) namespaces.
-
-### Standard Docker Command Template
+## 2. Docker
 
 ```bash
+DBGSRV="$(ls -d /Applications/IDA*.app/Contents/MacOS/dbgsrv | tail -n1)"
+mkdir -p work && cp "$DBGSRV/armlinux_server" work/    # linux_server on an x86_64 engine
 docker run --rm -it \
   --name ida_debug_target \
-  --ipc=host \
-  --pid=host \
   --cap-add=SYS_PTRACE \
   --security-opt seccomp=unconfined \
   -p 23946:23946 \
-  -v "$(pwd)":/workspace \
-  -w /workspace \
-  ubuntu:24.04 /bin/bash
+  -v "$PWD/work":/workspace -w /workspace \
+  ubuntu:24.04 /workspace/armlinux_server -p23946
 ```
 
-### Explaining Critical Container Flags
+- `-p 23946:23946`: publishes the server on host `127.0.0.1:23946`.
+- `--cap-add=SYS_PTRACE`: needed for `ptrace(2)`; without it attach and breakpoints fail.
+- `--security-opt seccomp=unconfined`: the default profile blocks `personality(ADDR_NO_RANDOMIZE)` and some tracing calls.
+- Do not add `--pid=host`, `--ipc=host`, `--privileged`, or `--network host` for an untrusted sample. Each one lets the sample reach outside the container. The hardened profile is in [malware-sandbox-isolation.md](../02-dynamic-instrumentation/malware-sandbox-isolation.md).
 
-- **`-p 23946:23946`**: Forwards the default IDA Pro remote debug server port from container to host `127.0.0.1`.
-- **`--cap-add=SYS_PTRACE`**: Grants the Linux capability required for `ptrace(2)` system calls. Without this capability, `linux_server` fails to attach to processes or set hardware/software breakpoints.
-- **`--security-opt seccomp=unconfined`**: Disables the default Docker seccomp filter which can block tracing and process inspection syscalls.
-- **`--ipc=host`**: Shares the host IPC namespace. This enables POSIX shared memory (`shm_open`), sysv IPC semaphores, and inter-process synchronization between debugger tools and target processes.
-- **`--pid=host`**: (Optional) Shares the host PID namespace, allowing `linux_server` inside the container to inspect and attach to processes running on the host or in sibling containers.
+On Apple Silicon, an `--platform linux/amd64` container runs under emulation. ptrace inside it is unreliable. Debug arm64 builds with `armlinux_server`, or use an x86_64 VM.
 
-### Running Debug Server in Container
+ASLR inside the container follows the Docker VM kernel. Disable it per process with `setarch -R ./target` or globally in the VM with `sysctl -w kernel.randomize_va_space=0` (needs `--privileged`).
 
-Copy `linux_server` (or `armlinux_server` if on an ARM64 container) into the container workspace and execute:
-
-```bash
-# Make binary executable
-chmod +x /workspace/linux_server
-
-# Start debug server listening on port 23946 (with optional password -P<pwd>)
-/workspace/linux_server -p23946
-
-# To disable ASLR for repeatable debugging addresses:
-echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
-```
-
-### Dockerfile Template for Isolated RE Environments
+Dockerfile:
 
 ```dockerfile
 FROM ubuntu:24.04
-
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    gdb \
-    strace \
-    ltrace \
-    curl \
-    libglib2.0-0 \
+RUN apt-get update && apt-get install -y --no-install-recommends gdb strace ltrace file \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /opt/dbgsrv
-COPY linux_server /opt/dbgsrv/linux_server
-RUN chmod +x /opt/dbgsrv/linux_server
-
+COPY armlinux_server /opt/dbgsrv/armlinux_server
+RUN chmod +x /opt/dbgsrv/armlinux_server
 EXPOSE 23946
-CMD ["/opt/dbgsrv/linux_server", "-p23946"]
+CMD ["/opt/dbgsrv/armlinux_server", "-p23946"]
 ```
 
 ---
 
-## 3. UTM Virtual Machine Remote Debugging
+## 3. UTM virtual machines
 
-When analyzing samples inside a UTM guest (Windows or Linux), follow the network and guest configuration steps below.
+The provisioning playbooks stage the servers and open the firewall:
 
-The provisioning playbooks already stage the servers and open the firewall:
-
-| Guest | Server location | Firewall |
+| Guest | Server path | Firewall |
 |---|---|---|
 | Windows | `C:\Tools\ida_dbgsrv\win64_remote.exe`, `win32_remote32.exe` | Rule `IDA-Pro-Remote-Debugger`, TCP 23946 |
-| Linux | `/opt/ida_dbgsrv/linux_server*` (x86_64) or `armlinux_server*` (ARM64) | UFW or firewalld, TCP 23946 |
-| macOS | `/opt/ida_dbgsrv/mac_server_arm` (Apple Silicon) or `mac_server` | PF anchor `com.re.tools`, TCP 23946 |
+| Linux | `/opt/ida_dbgsrv/linux_server`, `linux_server32` (x86_64) or `armlinux_server`, `armlinux_server32` (ARM64) | UFW (Debian/Ubuntu) or firewalld (RHEL/Fedora), TCP 23946 |
+| macOS | `/opt/ida_dbgsrv/mac_server_arm` (Apple Silicon) or `mac_server` | PF anchor `com.re.tools` (PF itself is not enabled by the play) |
 
-They are copied only when `setup_vm.py run-playbook` finds the IDA `dbgsrv` folder on the host. If the play prints "IDA debug servers NOT copied", set `IDA_DBGSRV=/path/to/dbgsrv` and run it again.
+The play copies them only when it gets `ida_dbgsrv_src`. `setup_vm.py run-playbook` fills it in automatically. If the play prints "IDA debug servers NOT copied", run `IDA_DBGSRV=/path/to/dbgsrv uv run scripts/setup_vm.py run-playbook --os <os>`.
 
-Windows 11 on Apple Silicon is ARM64. `win64_remote.exe` runs there under x64 emulation and debugs x64 and x86 processes. IDA 9.4 ships no native ARM64 Windows server, so native ARM64 PE targets need WinDbg in the guest instead.
+Windows 11 on Apple Silicon is ARM64. `win64_remote.exe` runs there under x64 emulation and debugs x64 and x86 processes. IDA 9.4 has no native ARM64 Windows server, so native ARM64 PE targets need WinDbg in the guest.
 
-### 1. Shared Network: connect to the guest IP
-UTM **Shared Network** (vmnet) has no port forwarding. Connect IDA straight to the guest address on the `192.168.64.0/24` or `192.168.65.0/24` bridge:
-```bash
-utmctl ip-address "<VM_NAME_OR_UUID>"     # needs the QEMU guest agent
-```
-In IDA, set the hostname to that address and the port to `23946`.
+### Network modes
 
-### 1b. Emulated VLAN: port forwarding to 127.0.0.1
-Port forwarding works only in **Emulated VLAN** mode (QEMU user networking).
-1. UTM VM Settings -> **Network** -> Network Mode: **Emulated VLAN**.
-2. **Port Forwarding** -> add TCP, host `127.0.0.1:23946` -> guest port `23946`.
-3. Save and boot. In IDA, the hostname is `127.0.0.1` and the port is `23946`.
-
-Use Emulated VLAN when the guest gets no DHCP lease on Shared Network. That happened with the Ubuntu cloud image on UTM 5. SSH is forwarded the same way, for example host 2222 -> guest 22.
-
-### 2. Bridged Network
-1. Set Network Mode to **Bridged (Advanced)**.
-2. The VM obtains an IP directly from the local router.
-3. Discover the IP address via:
-   ```bash
-   utmctl ip-address "<VM_NAME_OR_UUID>"
-   ```
-4. In IDA Pro on macOS, set the hostname to `<guest_ip>` and port to `23946`.
-
-### Guest Configuration: Linux VM
-1. Transfer `linux_server` (or `armlinux_server` for ARM64 Linux VM) to the guest.
-2. Grant execution permissions:
-   ```bash
-   chmod +x ./linux_server
-   ```
-3. Disable ASLR if repeatable memory locations are required:
-   ```bash
-   echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
-   ```
-4. Start the server:
-   ```bash
-   /opt/ida_dbgsrv/armlinux_server -p23946    # or linux_server on x86_64
-   ```
-
-### Guest Configuration: Windows VM
-1. Transfer `win64_remote.exe` (or `win32_remote32.exe`) into the Windows guest.
-2. Open Windows Firewall port 23946 or run an elevated PowerShell prompt:
-   ```powershell
-   New-NetFirewallRule -DisplayName "IDA Remote Debugger" -Direction Inbound -LocalPort 23946 -Protocol TCP -Action Allow
-   ```
-3. Start the debug server with Administrator privileges:
-   ```cmd
-   C:\Tools\ida_dbgsrv\win64_remote.exe -p23946
-   ```
-   From the host without the GUI, use the QEMU guest agent:
-   ```bash
-   uv run scripts/setup_utm.py guest-exec "Windows-RE-Lab" cmd.exe --args /c start "" C:\Tools\ida_dbgsrv\win64_remote.exe -p23946
-   ```
-
----
-
-## 4. Android Emulator Setup (`adb forward`)
-
-Debugging native Android code (`.so` libraries, unpackers, anti-tamper mechanisms) using IDA Pro:
-
-### Step 1: Forward Debug Server Port via ADB
-```bash
-# Forward host TCP port 23946 to Android emulator TCP port 23946
-adb forward tcp:23946 tcp:23946
-```
-
-### Step 2: Push Server Binary to Android Device
-Select the binary matching emulator architecture (`android_server` for ARM/ARM64, or `android_x64_server` for x86_64 Google APIs image):
-```bash
-# Resolve dbgsrv dynamically or via setup_utm.py ida-server-info
-DBGSRV_DIR="${IDADIR:-$(ls -d /Applications/IDA*.app/Contents/MacOS/dbgsrv 2>/dev/null | head -n1)}"
-adb push "$DBGSRV_DIR/android_server" /data/local/tmp/android_server
-adb shell chmod 755 /data/local/tmp/android_server
-```
-
-### Step 3: Run Server as Root via `su`
-```bash
-adb shell "su -c '/data/local/tmp/android_server -p23946'"
-```
-
----
-
-## 5. IDA Pro GUI Client Configuration
-
-Once the remote server binary is running on the target (Docker, UTM VM, or Android), configure IDA Pro:
-
-### 1. Select the Remote Debugger
-1. In the top menu, go to **Debugger -> Select debugger...** (or press `F2`).
-2. Choose the appropriate remote debugger engine:
-   - For Linux: **Remote Linux debugger**
-   - For Windows: **Remote Windows debugger**
-   - For Android / ARM Linux: **Remote ARM Linux/Android debugger**
-   - For macOS: **Remote Mac OS X debugger**
-
-### 2. Set Process Options
-Go to **Debugger -> Process options...**:
-
-| Option | Value / Description |
+| UTM mode | How IDA reaches the server |
 |---|---|
-| **Application** | Absolute path to target executable on the *guest* filesystem (e.g. `/workspace/target_elf` or `C:\malware\sample.exe`). |
-| **Input file** | Path to the binary file on the *host* (defaults to current IDB binary path). |
-| **Directory** | Working directory on the guest (e.g. `/workspace` or `C:\malware`). |
-| **Parameters** | CLI arguments passed to the guest application. |
-| **Hostname** | Target IP address (`127.0.0.1` for Docker / NAT port forwarding, or guest LAN IP for Bridged). |
-| **Port** | `23946` (or custom port passed to `-p`). |
-| **Password** | Leave blank unless `-P<password>` was passed to server binary. |
+| Shared Network (default, vmnet) | Guest IP on `192.168.64.0/24`. No port forwarding in this mode |
+| Emulated VLAN (QEMU user net) | Port forward host `127.0.0.1:23946` → guest `23946`, connect to `127.0.0.1` |
+| Bridged | Guest LAN IP |
+| Host Only | Guest IP on the host-only subnet |
 
-### 3. Breakpoint & Execution Options
-- **Debugger -> Debugger options...**:
-  - Check **Suspend on process entry point** to pause before any initialization code runs.
-  - Check **Suspend on library load/unload** to capture dynamic loader (`dlopen` / `LoadLibrary`) events.
-- Press **F9** to connect to the remote server and start execution.
-- Press **Attach to process...** under Debugger menu to attach to an already running PID in the guest.
+Get the guest IP (QEMU backend with guest agent only):
 
-### 4. Driving the debugger from an agent
-To run the session through the official `HexRaysSA/ida-mcp` server instead of the GUI, load the bounded helper and follow [../04-tool-usage/ida-mcp-remote-debugging.md](../04-tool-usage/ida-mcp-remote-debugging.md). Debugger selection, process options, and entry breakpoints there map to `re_dbg.load`, `re_dbg.start`, and `break_on_entry`.
+```bash
+VM="Linux-RE-Lab"          # name or UUID from: utmctl list
+utmctl ip-address "$VM"
+```
+
+Without a guest agent, read the IP in the guest (`ip -4 addr`, `ipconfig`, `ipconfig getifaddr en0`) or on the host from `/var/db/dhcpd_leases` (Shared Network and Apple NAT).
+
+Emulated VLAN forward: VM Settings > Network > Network Mode **Emulated VLAN** > **Port Forwarding** > New: TCP, guest port `23946`, host address `127.0.0.1`, host port `23946`. Add host `2222` → guest `22` for SSH the same way. Use Emulated VLAN when the guest gets no DHCP lease on Shared Network (seen with the Ubuntu cloud image on UTM 5).
+
+### Linux guest
+
+```bash
+sudo sysctl -w kernel.yama.ptrace_scope=0      # the playbook sets this persistently
+/opt/ida_dbgsrv/armlinux_server -p23946         # linux_server on x86_64
+```
+
+For fixed addresses, set `sudo sysctl -w kernel.randomize_va_space=0` in the guest.
+
+### Windows guest
+
+```powershell
+New-NetFirewallRule -DisplayName "IDA Remote Debugger" -Direction Inbound -LocalPort 23946 -Protocol TCP -Action Allow
+C:\Tools\ida_dbgsrv\win64_remote.exe -p23946
+```
+
+Run it from an elevated prompt to debug elevated or service processes. From the host without the GUI (QEMU guest agent):
+
+```bash
+VM="Windows-RE-Lab"
+uv run scripts/setup_utm.py guest-exec "$VM" cmd.exe \
+  --args /c start "" 'C:\Tools\ida_dbgsrv\win64_remote.exe' -p23946
+```
+
+Quote Windows paths in single quotes on the host shell; bash removes unquoted backslashes. A server started by the guest agent runs as SYSTEM in session 0 and cannot show GUI windows of the debuggee.
+
+### macOS guest
+
+```bash
+/opt/ida_dbgsrv/mac_server_arm -p23946      # run with sudo to attach to other users' processes
+```
+
+Hardened-runtime or platform binaries without `get-task-allow` cannot be attached while SIP is on. Disable SIP in the guest's Recovery (`csrutil disable`) for those targets.
 
 ---
 
-## 6. Verification and Troubleshooting Checklist
+## 4. Android emulator
 
-1. **Connection Refused (`127.0.0.1:23946`)**:
-   - Verify server binary is actively listening on the guest:
-     ```bash
-     ss -tulpn | grep 23946   # Linux
-     netstat -ano | findstr 23946 # Windows
-     ```
-   - Verify UTM port forwarding rule is saved and active, and that the NIC is in Emulated VLAN mode. Shared Network ignores port forwards.
-   - For Docker, ensure `-p 23946:23946` was specified at `docker run` time.
-2. **Permission Denied / Cannot Attach**:
-   - Ensure `--cap-add=SYS_PTRACE` was provided for Docker.
-   - Ensure debug server was launched with `sudo` / `su` / Administrator rights.
-3. **Architecture Mismatch**:
-   - Connecting `Remote Linux debugger` to `win64_remote.exe` fails. Match debugger plugin to guest server binary.
-   - Verify guest binary architecture via `file <binary>` before selecting `linux_server` (x86_64) vs `armlinux_server` (ARM64).
+```bash
+DBGSRV="$(ls -d /Applications/IDA*.app/Contents/MacOS/dbgsrv | tail -n1)"
+adb shell getprop ro.product.cpu.abi           # arm64-v8a -> android_server, x86_64 -> android_x64_server
+adb push "$DBGSRV/android_server" /data/local/tmp/android_server
+adb shell chmod 755 /data/local/tmp/android_server
+adb forward tcp:23946 tcp:23946
+adb shell su -c '/data/local/tmp/android_server -p23946'
+```
+
+On a Play Store image `su` comes from KernelSU ([host-and-lab-setup.md](host-and-lab-setup.md) section 3). Without root you can only debug a `debuggable` app as its own uid (`run-as`). In IDA use **Remote ARM Linux/Android debugger** with host `127.0.0.1`, port `23946`.
+
+---
+
+## 5. IDA client setup
+
+1. **Debugger > Select debugger...** and pick the debugger from the table in section 1.
+2. **Debugger > Process options...**:
+
+| Field | Value |
+|---|---|
+| Application | Target path on the server machine (`/workspace/target`, `C:\Workspace\sample.exe`) |
+| Input file | Same path as the IDB's input on the server machine |
+| Directory | Working directory on the server machine |
+| Parameters | Command-line arguments |
+| Hostname | `127.0.0.1` (Docker, Emulated VLAN forward, `adb forward`) or the guest IP |
+| Port | `23946` or the `-p` value |
+| Password | The `-P` value, else empty |
+
+3. **Debugger > Debugger options...**: **Suspend on process entry point**, **Suspend on library load/unload** as needed.
+4. **Debugger > Start process** (F9) launches the target. **Debugger > Attach to process...** attaches to a running PID.
+
+### From an agent
+
+Use only the official HexRaysSA `ida-mcp` server. Load the bounded helper and follow [../04-tool-usage/ida-mcp-remote-debugging.md](../04-tool-usage/ida-mcp-remote-debugging.md). Debugger choice, process options, and the entry breakpoint map to `re_dbg.load`, `re_dbg.start`, and `break_on_entry`.
+
+---
+
+## 6. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Connection refused on `127.0.0.1:23946` | No forward: UTM NIC is Shared Network, or Docker run without `-p` | Switch the NIC to Emulated VLAN and add the forward, or connect to the guest IP; re-run Docker with `-p 23946:23946` |
+| Connection refused on the guest IP | Server not running or bound elsewhere | Guest: `ss -ltnp \| grep 23946` (Linux), `netstat -ano \| findstr 23946` (Windows), `lsof -iTCP:23946 -sTCP:LISTEN` (macOS) |
+| Connection times out | Guest firewall | Linux `sudo ufw allow 23946/tcp`; Windows rule above; macOS application firewall: `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /opt/ida_dbgsrv/mac_server_arm` |
+| `utmctl ip-address` errors | No QEMU guest agent, or Apple backend VM | Install `qemu-guest-agent` (Linux) or UTM Guest Tools (Windows); for Apple VMs read the IP in the guest or `/var/db/dhcpd_leases` |
+| Handshake fails right after connect | Server copied from a different IDA version | Copy the server from the same IDA install as the client |
+| "Bad password" in the server log | `-P` set, client password empty or different | Match the password in Process options |
+| `ptrace: Operation not permitted` (Linux) | Yama `ptrace_scope` ≥ 1, or Docker without `SYS_PTRACE` | `sysctl kernel.yama.ptrace_scope=0`; add `--cap-add=SYS_PTRACE` |
+| Attach denied (macOS guest) | Target is hardened/platform binary, SIP on | Run server with sudo; `DevToolsSecurity -enable`; disable SIP for system targets |
+| Attach denied (Windows) | Target elevated or protected (PPL) | Start `win64_remote.exe` elevated; PPL processes need a kernel debugger |
+| "Wrong debugger" / no reply | Debugger plugin does not match server (e.g. Remote Linux debugger to `win64_remote.exe`) | Pick the debugger from the table in section 1 |
+| `exec format error` starting the server | Wrong architecture (x86_64 server on an ARM64 guest) | `uname -m` / `file target`; use `armlinux_server` on aarch64 |
+| Android: `android_server` exits at once | Not root, SELinux denial, or wrong ABI | `su -c`; check `getprop ro.product.cpu.abi`; `adb logcat \| grep avc` |

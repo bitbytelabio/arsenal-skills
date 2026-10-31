@@ -64,20 +64,26 @@ strings -a flutter-analysis/unpacked/lib/arm64-v8a/libflutter.so \
   | grep -E 'Flutter engine version|Dart VM version|SnapshotFormat|^[0-9a-f]{32}$'
 ```
 
-Recover AOT structure with `blutter` only after matching its Dart parser to the target snapshot:
+The 32-hex token is the **Dart VM snapshot version hash**: a hash of the snapshot format that the engine embeds, and that `libapp.so` must match exactly. It is not a semver. Resolve it to a Dart SDK commit/version by matching against the Dart SDK's `runtime/vm/version.cc`/git history, or let `blutter` (reads it from the engine) and `reflutter` (ships a hash→engine table) resolve it for you. A parser built for a different hash produces plausible but wrong names and offsets, so confirm the hash before trusting recovered symbols.
+
+Recover AOT structure with `blutter`. Blutter reads the Dart/engine version from `libapp.so`/`libflutter.so` itself, then fetches and builds the matching Dart SDK automatically, so you do not pre-select a parser — but it is **Android `arm64-v8a` only**. For iOS `App.framework` or 32-bit ABIs, blutter does not apply; fall back to manual object-pool analysis or `reflutter`. Build needs g++ 13+ or Clang 16+, plus capstone and icu4c (Homebrew on macOS). Pass the directory containing both `.so` files:
 
 ```bash
 python3 blutter.py \
   flutter-analysis/unpacked/lib/arm64-v8a \
   flutter-analysis/blutter-output
+# add --rebuild to force a fresh Dart build if the version changed
 ```
 
-Prioritize:
+Prioritize the outputs:
 
-- `pp.txt` for object-pool strings, URIs, keys, and constants;
-- `objs.txt` for libraries, classes, fields, and method code offsets;
-- generated assembly for object-pool-relative loads through Dart's pool pointer;
-- IDA/Ghidra scripts for applying recovered names to `libapp.so`.
+- `pp.txt` for all Object Pool objects: strings, URIs, keys, constants;
+- `objs.txt` for the nested Object Pool dump (libraries, classes, fields, method code offsets);
+- `asm/` for disassembly with recovered symbols, showing object-pool-relative loads through Dart's pool pointer;
+- `blutter_frida.js` as a ready-made Frida template keyed to the recovered addresses;
+- apply the recovered names to `libapp.so` in IDA via the official HexRaysSA `ida-mcp` (`execute_python`), or in Ghidra.
+
+If blutter's Dart build fails or the version is unsupported, do not trust a partial run — fall back to `pp.txt`-style object-pool string recovery with `strings`/`rabin2 -zz` and manual pool-pointer tracing.
 
 On AArch64 Dart AOT, `X27` commonly holds the pool pointer. A load such as `ldr x0, [x27, #0x280]` is an object-pool access, not a normal native global. Resolve the pool entry before assigning semantic meaning.
 
@@ -320,6 +326,8 @@ rabin2 -zz flutter-analysis/unpacked/lib/arm64-v8a/libflutter.so \
   | grep -E 'ssl_(client|server)|certificate|x509'
 r2 -AA flutter-analysis/unpacked/lib/arm64-v8a/libflutter.so
 ```
+
+The robust anchor across engine builds is the BoringSSL verifier `ssl_verify_peer_cert` (in `ssl_x509.cc` / `handshake.cc`), which calls the session verify-cert-chain routine. When symbols are stripped, pivot through BoringSSL error strings still present in `.rodata` — `rabin2 -zz libflutter.so | grep -E 'x509|ssl_|verify|CERTIFICATE_VERIFY_FAILED'` — and follow the xref to the function that returns the verify result. `ssl_crypto_x509_session_verify_cert_chain` is the older/alternate name; both reduce to the same boolean-returning gate. reFlutter patches exactly this function, so its source is a cross-reference for the signature.
 
 In the disassembler, identify the verifier from the exact engine build, record its ELF RVA, and hook `module.base.add(rva)`. Confirm that the address falls inside an `r-x` range and that the function returns a Boolean before changing it. Do not reuse an RVA from another Flutter version.
 

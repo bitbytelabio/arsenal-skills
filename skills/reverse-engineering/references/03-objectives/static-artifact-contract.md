@@ -70,12 +70,12 @@ The deliverable JSON must strictly adhere to the following field definitions:
 - **`file_type`**: Normalized short token (e.g., `ELF64`, `ELF32`, `PE32+`, `PE32`, `Mach-O 64-bit`). Never output a verbose descriptive sentence.
 - **`encoded_strings`**: Boolean `true` or `false`. Decide it at the decode site. `true` only when those bytes are readable text. A hex blob, a high-entropy buffer, or a label that looks easier to grade is not a decoded string.
 - **`decoded_c2` & `c2_protocol`**: Must be updated as a paired set:
-  - If a reachable command-and-control endpoint exists: `decoded_c2` must be a non-empty string (`"http://10.0.0.1:443"`) and `c2_protocol` must be `"http"`, `"tcp"`, or `"dns"`.
-  - If no C2 exists or is unreachable: both fields must be `null`.
+  - If a reachable remote-control endpoint exists: `decoded_c2` must be a non-empty string (`"http://10.0.0.1:443"`) and `c2_protocol` must be one transport token from the task schema's allowed set (commonly `http`/`tcp`/`dns`). Match the exact case the schema's `enum` uses; do not invent a case.
+  - If no such endpoint exists or it is unreachable: both fields must be `null`.
 - **`techniques`**: Observed behavior with an address in `evidence.md`. Linkage, a compiler, an executable-stack flag, and a section name are build properties, not techniques.
 - **`decoded_strings`**: Verified text only. Do not place raw binary hex blobs or unverified garbage here. Use the type the task schema declares, array or object. The example in this file is an array and does not override the schema.
 - **`anti_analysis`**: Array of verified anti-analysis or anti-debugging mechanisms. Explicitly note if an anti-analysis routine is unreachable from `main`.
-- **`c2_protocol`**: The transport token the schema allows (`TCP`, `UDP`, `HTTP`, `DNS`, `ICMP`), not a sentence. Set it and `decoded_c2` together, or set both to `null`.
+- **`c2_protocol`**: A single transport token from the task schema's `enum`, not a sentence. Use the schema's exact spelling and case. Set it and `decoded_c2` together, or set both to `null`.
 - **`decoded_c2`**: The endpoint reconstructed from bytes. `null` only after the application code has been walked and no outbound call and no embedded endpoint remain. "No plaintext in `strings`" is not that walk.
 - **`injection_details`**: Only a cross-process primitive (remote thread, remote write, hollowing, APC). Same-process `fork`, `dup2`, or `execve` is not injection. Omit the field when it does not apply.
 - **Schema example text**: Never copy an example value from the schema or from this file into the answer. A different file has different bytes.
@@ -94,7 +94,7 @@ The deliverable JSON must strictly adhere to the following field definitions:
 `check_deliverables.py` enforces that `evidence.md`:
 1. Is at least 200 characters in length.
 2. Contains at least one explicit hexadecimal address or offset matching the regex `0x[0-9a-fA-F]+`.
-3. Records at least one verified static command invocation (e.g., `file`, `strings`, `objdump`, `readelf`, `nm`, `xxd`, `openssl`).
+3. Records at least one verified static command invocation. The checker matches these names: `file`, `strings`, `objdump`, `gobjdump`, `readelf`, `nm`, `xxd`, `openssl`. On macOS use `gobjdump` (GNU binutils) or `rabin2`/`otool` output transcribed alongside one of these names.
 4. Contains textual traces corresponding to each claim in `techniques` and `anti_analysis`.
 
 #### Required Structure for `evidence.md`
@@ -111,7 +111,7 @@ The deliverable JSON must strictly adhere to the following field definitions:
   - Entry Point: `0x00001060` (File Offset: `0x00001060`)
   - Load Delta (`vma - file_offset`): `0x0`
 
-## 2. Decoded C2 & String Recovery
+## 2. Decoded Endpoint & String Recovery
 - Function: `sub_11A0` (VMA: `0x000011A0`, File Offset: `0x000011A0`)
 - Decompiled Logic:
   ```c
@@ -162,4 +162,4 @@ RESULT: PASS (structure only; verify observations yourself)
 ## Boundaries & Anti-Patterns
 - **Do not execute or emulate the target when a static contract is required**: Dynamic observation, hypervisors, and debuggers are strictly prohibited when operating under the static artifact contract.
 - **Do not output Markdown fences in `analysis.json`**: The file must be valid, parseable JSON beginning with `{` and ending with `}`.
-- **Do not report speculative or ungrounded claims**: Every technique, string, and C2 entry in the JSON must cite the exact instruction address and command in `evidence.md`.
+- **Do not report speculative or ungrounded claims**: Every technique, string, and `decoded_c2` entry in the JSON must cite the exact instruction address and command in `evidence.md`.

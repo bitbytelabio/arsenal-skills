@@ -13,6 +13,7 @@ Scans file headers, magic bytes, section names, and strings to identify compiler
 signatures and recommend appropriate progressive disclosure references.
 """
 
+import argparse
 import collections
 import json
 import math
@@ -20,7 +21,6 @@ import mimetypes
 import os
 import shutil
 import subprocess
-import sys
 import tarfile
 import zipfile
 
@@ -855,12 +855,11 @@ def triage_file(filepath: str) -> dict:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <binary-or-artifact-file> [--json]")
-        sys.exit(1)
-
-    filepath = sys.argv[1]
-    res = triage_file(filepath)
+    parser = argparse.ArgumentParser(description="Classify an artifact and name the matching reference. Prints JSON.")
+    parser.add_argument("artifact", help="binary, package, firmware image, or archive to triage")
+    parser.add_argument("--json", action="store_true", help="accepted for compatibility; output is always JSON")
+    args = parser.parse_args()
+    res = triage_file(args.artifact)
     print(json.dumps(res, indent=2))
 
 

@@ -1,56 +1,34 @@
-# JSHook MCP — Advanced JavaScript Reverse Engineering, CDP Debugging & Dynamic Hooking
+# jshook MCP (`@jshookmcp/jshook`): Browser and JavaScript Reverse Engineering
 
-## 1. Title & Overview
-- **Domain**: Advanced client-side JavaScript reverse engineering, browser automation, Chrome DevTools Protocol (CDP) session debugging, stealth dynamic runtime hooking, V8 and TurboFan execution analysis, WebAssembly (WASM) inspection, and automated AST deobfuscation.
-- **Package & Architecture**: `@jshookmcp/jshook` (`0.3.5`) deployed as a high-performance Model Context Protocol (MCP) server. It integrates over 600 specialized tools spanning 34 domain modules to automate complete browser and engine-level reverse engineering workflows.
-- **Search-First Token Optimization**: Built specifically for token-constrained agent contexts. When running under `MCP_TOOL_PROFILE=search` (configured in `agent/mcp.json`), the server exposes a ultra-lean surface (~3K tokens) driven by meta-tools (`search_tools`, `describe_tool`, `call_tool`, `coverage_report`), eliminating prompt bloat while retaining instantaneous access to the complete 600+ tool suite.
-- **Transport Modalities**: Supports local stdio execution for isolated agent processes, as well as high-throughput shared HTTP daemon deployment (`http://127.0.0.1:3000/mcp`) for multi-agent collaboration and persistent browser session reuse.
-
----
-
-## 2. Trigger Conditions & Detection Indicators
-Engage `jshookmcp` whenever dynamic browser instrumentation, runtime JavaScript tracing, or complex client-side obfuscation exceeds the capabilities of static analysis:
-
-### Target Architecture & Runtime Triggers
-- **Commercial JavaScript Obfuscators & Encoders**:
-  - JScrambler protected scripts (polymorphic obfuscation, control-flow flattening, date/domain locks, self-defending integrity checks).
-  - Obfuscator.io (hex variable mangling, rotated string array encryption, dead-code injection, function proxy wrappers).
-  - Webpack, Rollup, or Vite minified bundles with hidden entry points and dynamic chunk loading.
-- **JSVMP (JavaScript Virtual Machine Protection)**:
-  - Custom virtual machines executing proprietary bytecode streams via an embedded interpreter loop (`vpc`, `vsp`, operand stack, instruction dispatcher).
-  - Code protection requiring dynamic opcode tracing, bytecode dumping, and semantic devirtualization.
-- **Anti-Debugging & Runtime Environment Fingerprinting**:
-  - Aggressive `debugger;` statement loops, timing-based breakpoint detectors (`performance.now()`, `console.time()`).
-  - Function tampering checks (`Function.prototype.toString` validation).
-  - Bot protection and browser fingerprinting (Canvas, WebGL, AudioContext, navigator overrides, DOM integrity checks).
-- **Complex Client-Side Cryptography & Network Protocols**:
-  - Proprietary request signature generation (e.g., custom HMAC, dynamic token generation, encrypted payload bodies).
-  - WebSocket and HTTP/2 framing requiring live frame/message capture and payload inspection before transport encryption.
-  - WebAssembly (WASM) cryptographic cores interoperating with JavaScript host wrappers.
+- **Domain**: Client-side JavaScript reversing through an MCP server: Chromium/Camoufox automation over CDP, script collection and search, network and WebSocket capture, runtime hooks, breakpoints, anti-debug bypass, AST deobfuscation (webcrack, string arrays, control-flow flattening, JSVMP), source maps, WASM, and V8 heap inspection.
+- **Package**: `@jshookmcp/jshook` 0.4.3 (npm), repo `vmoranv/jshookmcp`, AGPL-3.0. 735 tools in 36 domains per the package's registry snapshot.
+- **Verified**: package metadata with `npm view`; tool names, descriptions, and input schemas by starting the server locally (stdio) and calling `tools/list` under the `search`, `workflow`, and `full` profiles. Tool behavior against live pages was not exercised. Names change between releases: confirm with `search_tools` / `describe_tool` before calling.
+- **Related**: static bundle work without a browser is in [../01-static-architectures/browser-js-wasm.md](../01-static-architectures/browser-js-wasm.md) and [../01-static-architectures/browser-extensions.md](../01-static-architectures/browser-extensions.md). Node/Electron static reconstruction is also available through REA ([rea-ghidra.md](rea-ghidra.md) section 7).
 
 ---
 
-## 3. Server Architecture, Profiles & Transport
+## 1. When to use it
 
-### Operational Modes & Profiles
-`jshookmcp` manages its tool registry dynamically using the `MCP_TOOL_PROFILE` environment variable:
+Static first: download the bundle, run `webcrack`/Babel offline, read source maps. Use jshook when the answer needs the running page:
 
-| Profile Mode | Token Overhead | Exposed Tool Surface | Operational Behavior |
-| :--- | :--- | :--- | :--- |
-| **`search` (Default)** | **~3,000 tokens** | **Meta-tools only** (`search_tools`, `describe_tool`, `call_tool`, `coverage_report`) | Tools are discovered on-demand via semantic search and dynamically invoked through `call_tool`. Highly recommended for all agent tasks. |
-| **`workflow`** | ~18,000 tokens | Curated high-frequency workflows (~40-60 tools) | Directly exposes core browser navigation, script listing, source retrieval, and dynamic hooking primitives. |
-| **`full`** | ~120,000+ tokens | Complete catalog (600+ tools) | Directly exposes all 34 domain modules. Useful only for specialized environments with very large context windows. |
+- A request signature, token, or encrypted body is built at runtime.
+- Code arrives dynamically (`eval`, `new Function`, lazy chunks, WASM instantiate).
+- The page fights inspection (`debugger;` loops, timing checks, devtools detection).
+- Values exist only in memory (decrypted config, keys inside closures).
+- A JSVMP interpreter needs its opcode handlers traced.
 
-### Transport Configuration
+---
 
-#### 1. Stdio Mode (Configured in `agent/mcp.json`)
+## 2. Install and transports
+
+stdio (one server process per MCP host):
+
 ```json
 {
   "mcpServers": {
     "jshook": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@jshookmcp/jshook@0.3.5"],
+      "args": ["-y", "@jshookmcp/jshook@0.4.3"],
       "env": {
         "MCP_TOOL_PROFILE": "search",
         "npm_config_omit": "optional"
@@ -60,376 +38,183 @@ Engage `jshookmcp` whenever dynamic browser instrumentation, runtime JavaScript 
 }
 ```
 
-#### 2. Shared HTTP Daemon Mode (`http://127.0.0.1:3000/mcp`)
-For long-lived browser sessions, shared debugging contexts across multiple agents, or remote execution:
+`npm_config_omit=optional` skips the ONNX, Z3, Binaryen, Camoufox, and Playwright extras. Remove it when you need Camoufox, symbolic execution, or `wasm-opt`.
+
+Shared Streamable HTTP daemon (one browser and cache for several agents):
+
 ```bash
-# Launch shared daemon with search profile
-MCP_TOOL_PROFILE=search npx -y @jshookmcp/jshook@0.3.5 --port 3000 --host 127.0.0.1
+MCP_TRANSPORT=http MCP_HOST=127.0.0.1 MCP_PORT=3000 MCP_TOOL_PROFILE=search \
+  npx -y @jshookmcp/jshook@0.4.3
+# clients connect to http://127.0.0.1:3000/mcp
 ```
 
-### Meta-Tools Discovery Protocol (Search Profile)
-When operating under `MCP_TOOL_PROFILE=search`, execute tool interactions via the standard 3-step sequence:
+| Variable | Default | Effect |
+|---|---|---|
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `3000` | HTTP bind |
+| `MCP_AUTH_TOKEN` | unset | Required before binding beyond loopback |
+| `MCP_TOOL_PROFILE` | see below | `search`, `workflow`, or `full` |
+| `SEARCH_VECTOR_ENABLED` | `true` | `false` keeps tool search lexical (no embedding model) |
 
-```text
-┌────────────────┐      1. search_tools(query)      ┌──────────────────┐
-│                │ ───────────────────────────────> │  Matched Tool    │
-│  Agent Engine  │                                  │  Names & Domain  │
-│                │ <─────────────────────────────── └──────────────────┘
-│                │
-│                │      2. describe_tool(tool_name) ┌──────────────────┐
-│                │ ───────────────────────────────> │  JSON Schema &   │
-│                │                                  │  Exact Params    │
-│                │ <─────────────────────────────── └──────────────────┘
-│                │
-│                │      3. call_tool(name, params)  ┌──────────────────┐
-│                │ ───────────────────────────────> │  Target Tool     │
-│                │                                  │  Execution       │
-│                │ <─────────────────────────────── └──────────────────┘
-└────────────────┘
-```
+Profiles (counts measured with `tools/list` on 0.4.3):
 
-1. **`search_tools`**: Search the 600+ tool index by capability or intent.
-   - Example: `search_tools({ query: "websocket intercept" })`
-2. **`describe_tool`**: Inspect the full JSON schema, input parameters, and return types.
-   - **Rule**: NEVER guess tool parameters; always call `describe_tool` before invocation.
-   - Example: `describe_tool({ tool_name: "get_websocket_messages" })`
-3. **`call_tool`**: Execute the tool through the meta-dispatcher with validated parameters.
-   - Example: `call_tool({ tool_name: "get_websocket_messages", arguments: { page_id: "PAGE_1", limit: 50 } })`
-4. **`coverage_report`**: Inspect loaded domain modules and active target connections.
+| Profile | Tools exposed at start | Use |
+|---|---|---|
+| `search` | 8 meta tools | Default for agents. Discover and activate on demand |
+| `workflow` | ~360 | Long sessions chaining browser, debugger, network, and deobfuscation tools |
+| `full` | ~720 | Only for clients that handle very large tool lists |
 
 ---
 
-## 4. Deep Capability Domains & Tool Matrix
+## 3. Meta tools (search profile)
 
-`jshookmcp` organizes its 600+ tools into 34 functional domains. The core domains critical for reverse engineering workflows include:
+| Tool | Arguments | Behavior |
+|---|---|---|
+| `search_tools` | `query`, `top_k` (≤30), `auto_activate` (default `true`) | BM25 + vector search over all tools. Found tools are activated and become directly callable |
+| `route_tool` | `task`, `context` | Natural-language task → recommended tools and next steps |
+| `describe_tool` | `name` | Full JSON Schema of one tool |
+| `activate_tools` | `names`, `precheck` | Register exact tools. `precheck` reports LRU evictions without changing anything |
+| `activate_domain` | `domain`, `ttlMinutes`, `precheck` | Register a whole domain (for example `debugger`, `network`, `wasm`) |
+| `deactivate_tools` | `names` | Free context |
+| `call_tool` | `name`, `args` | Run an already active tool when the client did not refresh its tool list. Does not activate |
+| `coverage_report` | none | Which tools were called and which remain |
 
-### 4.1 Browser & CDP Control Domain
-Provides fine-grained lifecycle management of Chromium pages, workers, iframes, network pipelines, and source registries via direct Chrome DevTools Protocol sessions:
-
-| Tool Name | Scope & Functionality | Key Parameters |
-| :--- | :--- | :--- |
-| **`new_page`** | Spawns a new isolated browser context and targets a specified URL. | `url`, `viewport`, `user_agent` |
-| **`navigate_page`** | Navigates existing session to target URL with configurable wait triggers (`networkidle`, `domcontentloaded`). | `page_id`, `url`, `wait_until`, `timeout` |
-| **`select_page`** | Lists and attaches to an active target page, popup, or background worker. | `page_id` or `target_id` |
-| **`select_frame`** | Switches execution context to a specific nested `<iframe>` on the page. | `page_id`, `frame_id` or `frame_selector` |
-| **`take_screenshot`** | Captures visual page state or specific DOM element for UI validation. | `page_id`, `full_page`, `selector` |
-| **`list_network_requests`** | Retrieves network request history with status codes, headers, and mime types. | `page_id`, `filter_url`, `resource_type` |
-| **`get_request_initiator`** | **Critical RE Tool**: Traces a network request directly to the JavaScript call stack and source line that triggered it. | `page_id`, `request_id` |
-| **`list_scripts`** | Enumerates all parsed JavaScript and WebAssembly source assets loaded by the page. | `page_id`, `include_inlined` |
-| **`get_script_source`** | Retrieves the raw source text or bytecode mapping of a specific loaded script. | `script_id` |
-| **`search_in_sources`** | Full-text and regex search across all loaded scripts and source maps. | `page_id`, `query`, `is_regex`, `case_sensitive` |
-
-### 4.2 Dynamic JS Hooking & Debugging Domain
-Provides non-invasive runtime observation, automated breakpoint management, and dynamic state evaluation:
-
-| Tool Name | Scope & Functionality | Key Parameters |
-| :--- | :--- | :--- |
-| **`break_on_xhr`** | Sets an automatic breakpoint matching specific URL substrings on `XMLHttpRequest` and `fetch`. | `url_pattern`, `page_id` |
-| **`set_breakpoint_on_text`** | Sets source breakpoints on specific text patterns or function definitions without calculating line offsets. | `page_id`, `pattern`, `script_id` |
-| **`get_paused_info`** | Inspects execution state when paused: call frames, local/closure scopes, and `this` binding. | `page_id` |
-| **`pause_or_resume`** | Controls execution stepping: resume (`step_continue`), `step_over`, `step_into`, or `step_out`. | `page_id`, `action` |
-| **`evaluate_script`** | Evaluates arbitrary JavaScript expressions within the current page, frame, or paused stack frame. | `page_id`, `expression`, `call_frame_id` |
-| **`install_function_hook`** | Hooks functions to log, modify, or intercept arguments and return values at runtime. | `page_id`, `target_object`, `method_name`, `hook_code` |
-| **`spoof_environment`** | Injects stealth evasion overrides before document execution: spoof `navigator.webdriver`, canvas fingerprint, WebGL vendor, and AudioContext. | `page_id`, `presets`, `custom_overrides` |
-| **`suppress_debugger_statements`**| Automatically neuters `debugger;` opcodes and anti-analysis timing traps at the CDP level. | `page_id`, `enable` |
-
-### 4.3 AST Transforms & Deobfuscation Domain
-Employs embedded Babel, AST manipulation, and symbolic simplification engines to strip commercial obfuscation layers:
-
-| Tool Name | Scope & Functionality | Target Obfuscation |
-| :--- | :--- | :--- |
-| **`JScramblerDeobfuscator`** | Analyzes and reverses JScrambler protections: strips self-defending predicates, decodes polymorphic string arrays, inlines function call proxies, and reconstructs linearized control flow. | Commercial JScrambler layers |
-| **`VMDeobfuscator`** | **JSVMP Devirtualizer**: Inspects bytecode streams, maps virtual opcode dispatchers, extracts virtual stack operations, and synthesizes high-level JavaScript AST equivalents. | Custom JSVMP / Virtual Machines |
-| **`PackerDeobfuscator`** | Detects and unpacks common JavaScript packers: Dean Edwards Packer, `eval(function(p,a,c,k,e,d)...)`, JJencode, AAencode, JSFuck. | Encoded script packers |
-| **`unpack_string_array`** | Evaluates string array rotation routines in a secure sandbox and substitutes literal values at all call sites. | Obfuscator.io / Generic string tables |
-| **`constant_folding`** | Evaluates static arithmetic expressions (`0x1a + 0x2b` -> `0x45`), boolean logic, and binary operations across AST paths. | General minified & flattened ASTs |
-| **`control_flow_unflatten`** | Reconstructs structured loops (`for`, `while`) and `if/else` conditionals from state-machine `switch(dispatcher)` blocks. | Control-Flow Flattening (CFF) |
-
-### 4.4 V8 & TurboFan Internals Domain
-Examines the underlying V8 JavaScript engine compilation pipeline, TurboFan optimization graphs, and heap layouts:
-
-| Tool Name | Scope & Functionality | Research Application |
-| :--- | :--- | :--- |
-| **`turbofan-graph`** | Extracts and visualizes the TurboFan intermediate representation (IR) graph for JIT-compiled functions. | Tracking type feedback, JIT vulnerabilities, speculative optimization |
-| **`TurboFanTraceCollector`**| Records optimization phases, node schedules, and machine code generation events for targeted functions. | Identifying JIT optimization bypasses and compiler behavior |
-| **`deopt-trace`** | Captures deoptimization triggers (e.g., eager deopt, soft deopt, bailout reasons) caused by polymorphic calls. | Anti-analysis detection that abuses engine bailout behaviors |
-| **`track_allocations`** | Tracks real-time memory allocations per function, locating heap buffer churn. | Locating high-throughput cryptographic operations |
-| **`parse_heap_snapshot`** | Ingests and queries Chrome V8 heap snapshots (`.heapsnapshot`) to recover retained objects, closures, and keys. | Extracting in-memory decrypted credentials, keys, and tokens |
-
-### 4.5 WASM & Memory Forensics Domain
-Inspects WebAssembly modules, garbage collection internals, and native browser memory:
-
-| Tool Name | Scope & Functionality | Research Application |
-| :--- | :--- | :--- |
-| **`WasmGcInspector`** | Inspects WASM Garbage Collection (WasmGC) struct definitions, array types, and dynamic allocations. | Modern Dart/Kotlin/Go WASM modules |
-| **`disassemble_wasm`** | Disassembles loaded `.wasm` bytecode chunks into linear WAT (WebAssembly Text) representation. | Auditing WASM cryptographic algorithms |
-| **`HardwareBreakpoint`** | Emulates hardware watchpoints on specific memory addresses within WASM linear memory buffers. | Tracing memory reads/writes to encryption keys |
-| **`MemoryScanner`** | Scans browser tab process memory for patterns, byte signatures, and structured strings. | Memory carving of decrypted payloads |
-| **`PointerChainEngine`** | Resolves dynamic pointer multi-level offsets inside heap memory to locate volatile structures. | Locating runtime state anchors across refreshes |
-
-### 4.6 Network & Protocol Domain
-Direct frame-level interception of encrypted or multiplexed protocols:
-
-| Tool Name | Scope & Functionality | Research Application |
-| :--- | :--- | :--- |
-| **`http2_frame_builder`** | Parses, reconstructs, and inspects HTTP/2 multiplexed streams, DATA frames, and HEADERS frames. | Bypassing HTTP/1 layer inspection limits |
-| **`get_websocket_messages`** | Captures live bidirectional WebSocket frames (text, binary, ping/pong) with millisecond timestamps. | Real-time gaming, financial tickers, server-pushed task feeds |
-| **`graphql_inspector`** | Parses GraphQL queries, mutations, subscriptions, and schema introspection endpoints. | Mapping hidden API attack surfaces |
-| **`boringssl-inspector`** | Hooks Chromium BoringSSL functions at the native layer to intercept plaintext TLS traffic before encryption. | Universal TLS interception without CA installation |
+Loop: `search_tools` with 2–5 keywords → `describe_tool` → call the tool directly (or through `call_tool`). Never guess argument names; schemas below were current for 0.4.3 only.
 
 ---
 
-## 5. Five-Phase Reverse Engineering Workflow
+## 4. Verified tool map
 
-Follow the standardized 5-phase methodology when conducting investigations with `jshookmcp`:
+| Task | Tools (key arguments) |
+|---|---|
+| Browser | `browser_launch` (`driver: chrome\|camoufox`, `headless`, `mode: launch\|connect`, `browserURL`, `proxy`, `userDataDir`, `sslKeyLogFile`), `browser_attach` (`browserURL`, `wsEndpoint`), `browser_list_tabs`, `browser_select_tab`, `browser_close` |
+| Navigation | `page_navigate` (`url`, `waitUntil: load\|domcontentloaded\|networkidle\|commit`, `enableNetworkMonitoring`), `page_evaluate` (`code`), `page_inject_script` (`script`, runs on every load), `page_screenshot` |
+| Scripts | `get_all_scripts` (`includeSource`), `get_script_source` (`scriptId` or `url`, `startLine`, `endLine`), `collect_code` (`url`, `smartMode: summary\|priority\|incremental\|full`), `search_in_scripts` (`keyword`, `isRegex`, `contextLines`, `maxMatches`) |
+| Network | `network_enable`, `network_get_requests` (`url`, `urlRegex`, `method`, `tail`, `limit`), `network_get_response_body` (`requestId`), `network_export_har` (`outputPath`, `includeBodies`), `network_replay_request`, `console_inject_fetch_interceptor`, `console_inject_xhr_interceptor` |
+| Streams | `ws_monitor` (`action: enable\|disable`, `urlFilter`), `ws_get_frames` (`direction`, `payloadFilter`), `sse_monitor_enable`, `grpc_monitor`, `webrtc_monitor` |
+| Proxy / TLS | `proxy_start` (`port`, `useHttps`, `capture`; auto-generates a CA), `proxy_get_requests`, `tls_keylog_enable` |
+| Debugger | `debugger_lifecycle` (`action: enable\|disable`), `breakpoint` (`action: set\|remove\|list`, `type: code\|function\|xhr\|event\|event_category\|exception`), `debugger_wait_for_paused` (`timeout`), `debugger_get_paused_state`, `get_call_stack`, `debugger_evaluate` (`context: frame\|global`, `expression`, `callFrameId`), `get_scope_variables_enhanced`, `debugger_step`, `debugger_resume`, `blackbox_add_common` |
+| Hooks | `hook_preset` (`preset`/`presets`, `captureStack`, `method: evaluate\|evaluateOnNewDocument`, `listPresets`), `manage_hooks` (`action: create\|list\|records\|clear`, `type: function\|xhr\|fetch\|websocket\|localstorage\|cookie`, `hookAction: log\|block\|modify`), `ai_hook` (`action: inject\|get_data\|list\|clear\|toggle\|export`) |
+| Anti-debug / stealth | `antidebug_detect_protections`, `antidebug_bypass` (`types: all\|debugger_statement\|timing\|stack_trace\|console_detect`, `persistent`, `mode: remove\|noop`), `stealth_inject`, `stealth_verify` |
+| Deobfuscation | `deobfuscate` (`code`, `engine: auto\|webcrack\|jscrambler\|packer\|vm`, `unpack`, `unminify`, `outputDir`), `js_deobfuscate_pipeline` (`code`, `aggressive`), `analysis_decode_string_array`, `analysis_deflat_control_flow`, `detect_obfuscation`, `detect_crypto`, `webcrack_unpack`, `understand_code` |
+| JSVMP | `js_analyze_vm` (`code`, `extractBytecode`, `mapOpcodes`), `js_deobfuscate_jsvmp` (`code`, `extractInstructions`), `js_symbolic_execute_jsvmp` |
+| Source maps | `sourcemap_discover`, `sourcemap_fetch_and_parse`, `sourcemap_reconstruct_tree` (`sourceMapUrl`, `outputDir`, `inferMissing`) |
+| WASM | `wasm_dump` (`moduleIndex`, `outputPath`), `wasm_disassemble` / `wasm_decompile` (`inputPath`, `outputPath`), `wasm_string_extract`, `wasm_instrument_trace` |
+| V8 / heap | `v8_heap_snapshot_capture`, `v8_heap_snapshot_analyze`, `js_heap_search` (`pattern`), `v8_bytecode_extract`, `v8_turbofan_graph`, `v8_deopt_trace` |
 
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                   JSHook MCP 5-Phase RE Workflow                       │
-├────────────────────────────────────────────────────────────────────────┤
-│  Phase 1: OBSERVE    ─► Navigate, enumerate scripts, search sources   │
-│  Phase 2: INTERCEPT  ─► Trace request initiators, break on XHR/Fetch   │
-│  Phase 3: HOOK       ─► Function interception, argument/return taps   │
-│  Phase 4: TRACE      ─► Bytecode dumping, JSVMP tracing, TurboFan IR   │
-│  Phase 5: REBUILD    ─► AST deobfuscation, SourceMap, Node.js harness  │
-└────────────────────────────────────────────────────────────────────────┘
-```
+`hook_preset` presets in 0.4.3: `eval`, `function-constructor`, `atob-btoa`, `crypto-subtle`, `json-stringify`, `object-defineproperty`, `settimeout`, `setinterval`, `addeventlistener`, `postmessage`, `webassembly`, `proxy`, `reflect`, `history-pushstate`, `location-href`, `navigator-useragent`, `eventsource`, `window-open`, `mutationobserver`, `formdata`, plus composite `anti-debug-bypass`, `crypto-key-capture`, `webassembly-full`.
 
-### Phase 1: Observe (`Observe-first`)
-*Objective*: Inspect the running application passively without triggering anti-tampering heuristics or debugger detection loops.
-
-1. **Launch Target Session**:
-   ```javascript
-   // Via call_tool
-   call_tool({
-     tool_name: "new_page",
-     arguments: { url: "https://target-portal.internal/login" }
-   });
-   ```
-2. **Neutralize Anti-Analysis & Fingerprinting**:
-   Before scripts execute, inject stealth overrides and suppress `debugger;` loops:
-   ```javascript
-   call_tool({
-     tool_name: "suppress_debugger_statements",
-     arguments: { page_id: "PAGE_1", enable: true }
-   });
-   call_tool({
-     tool_name: "spoof_environment",
-     arguments: {
-       page_id: "PAGE_1",
-       presets: ["stealth_desktop_chrome"]
-     }
-   });
-   ```
-3. **Inventory Assets & Scripts**:
-   ```javascript
-   const scripts = call_tool({
-     tool_name: "list_scripts",
-     arguments: { page_id: "PAGE_1" }
-   });
-   ```
-4. **Search for Cryptographic & Sensitive Indicators**:
-   ```javascript
-   call_tool({
-     tool_name: "search_in_sources",
-     arguments: {
-       page_id: "PAGE_1",
-       query: "(encrypt|signature|token|payload|privateKey)",
-       is_regex: true
-     }
-   });
-   ```
-
-### Phase 2: Intercept (`Hook-preferred`)
-*Objective*: Pinpoint the exact code path generating suspicious network traffic or processing sensitive parameters.
-
-1. **Inspect Network Request Log**:
-   ```javascript
-   const reqs = call_tool({
-     tool_name: "list_network_requests",
-     arguments: {
-       page_id: "PAGE_1",
-       filter_url: "/api/v2/secure-auth"
-     }
-   });
-   ```
-2. **Trace Request Initiator (Call Stack Recovery)**:
-   Instead of setting broad breakpoints, trace the request initiator back to the exact script, function, and column:
-   ```javascript
-   const initiator = call_tool({
-     tool_name: "get_request_initiator",
-     arguments: {
-       page_id: "PAGE_1",
-       request_id: reqs[0].request_id
-     }
-   });
-   // Returns exact stack trace:
-   // at buildSignature (auth.bundle.js:142:15)
-   // at sendEncryptedPayload (auth.bundle.js:210:9)
-   ```
-3. **Arm Targeted XHR/Fetch Breakpoints**:
-   ```javascript
-   call_tool({
-     tool_name: "break_on_xhr",
-     arguments: {
-       page_id: "PAGE_1",
-       url_pattern: "/api/v2/secure-auth"
-     }
-   });
-   ```
-
-### Phase 3: Hook
-*Objective*: Intercept critical parameters, extract intermediate cryptographic keys, and modify return values dynamically without stopping execution.
-
-1. **Install Non-Invasive Function Hook**:
-   Hook the recovered signature function to log input arguments and computed results directly:
-   ```javascript
-   call_tool({
-     tool_name: "install_function_hook",
-     arguments: {
-       page_id: "PAGE_1",
-       target_object: "window.AuthClient.prototype",
-       method_name: "signRequest",
-       hook_code: `
-         const orig = window.AuthClient.prototype.signRequest;
-         window.AuthClient.prototype.signRequest = function(...args) {
-           console.log('[*] signRequest called with args:', JSON.stringify(args));
-           const result = orig.apply(this, args);
-           console.log('[*] signRequest returned:', result);
-           return result;
-         };
-       `
-     }
-   });
-   ```
-2. **Dynamic Argument & State Evaluation**:
-   If paused on a breakpoint, query the local activation frame:
-   ```javascript
-   const frame = call_tool({
-     tool_name: "get_paused_info",
-     arguments: { page_id: "PAGE_1" }
-   });
-   const secretKey = call_tool({
-     tool_name: "evaluate_script",
-     arguments: {
-       page_id: "PAGE_1",
-       call_frame_id: frame.top_frame_id,
-       expression: "localKeyBuffer.toString('hex')"
-     }
-   });
-   ```
-
-### Phase 4: Trace
-*Objective*: Deconstruct complex state machines, virtualized bytecode dispatchers, and JIT-optimized functions.
-
-1. **JSVMP Opcode & Bytecode Tracing**:
-   When encountering a virtualized dispatcher loop (`while(vpc < len) switch(...)`), attach an opcode execution recorder:
-   ```javascript
-   call_tool({
-     tool_name: "install_function_hook",
-     arguments: {
-       page_id: "PAGE_1",
-       target_object: "window.__vmInterpreter",
-       method_name: "step",
-       hook_code: `
-         window.__vm_traces = window.__vm_traces || [];
-         const origStep = window.__vmInterpreter.step;
-         window.__vmInterpreter.step = function(op, pc, stack) {
-           window.__vm_traces.push({
-             pc: pc,
-             opcode: op,
-             operand: stack[stack.length - 1]
-           });
-           return origStep.apply(this, arguments);
-         };
-       `
-     }
-   });
-   ```
-2. **Dump Captured Instruction Stream**:
-   ```javascript
-   const traces = call_tool({
-     tool_name: "evaluate_script",
-     arguments: {
-       page_id: "PAGE_1",
-       expression: "JSON.stringify(window.__vm_traces.slice(0, 500))"
-     }
-   });
-   ```
-3. **TurboFan Compilation & Deoptimization Auditing**:
-   For performance-critical cryptographic routines, inspect TurboFan compilation tiers:
-   ```javascript
-   call_tool({
-     tool_name: "turbofan-graph",
-     arguments: {
-       page_id: "PAGE_1",
-       function_name: "decryptStreamBlock"
-     }
-   });
-   ```
-
-### Phase 5: Rebuild (`Rebuild-oriented`)
-*Objective*: Transform analyzed code into clean, human-readable, standalone algorithms executable locally in Node.js or Python.
-
-1. **Automated AST Deobfuscation**:
-   Run the raw script through specialized deobfuscation passes:
-   ```javascript
-   // Unpack string arrays and inline rotation helpers
-   const cleanCode = call_tool({
-     tool_name: "unpack_string_array",
-     arguments: {
-       source_code: rawObfuscatedSource,
-       sandbox_timeout_ms: 2000
-     }
-   });
-
-   // Unflatten control-flow state machines
-   const structuredCode = call_tool({
-     tool_name: "control_flow_unflatten",
-     arguments: {
-       source_code: cleanCode
-     }
-   });
-
-   // Fold static constants
-   const finalSource = call_tool({
-     tool_name: "constant_folding",
-     arguments: {
-       source_code: structuredCode
-     }
-   });
-   ```
-2. **JSVMP Devirtualization**:
-   Pass the recorded bytecode and instruction traces to `VMDeobfuscator` to synthesize clean JavaScript AST:
-   ```javascript
-   const devirtualizedSource = call_tool({
-     tool_name: "VMDeobfuscator",
-     arguments: {
-       bytecode: rawBytecodeBuffer,
-       opcode_trace: traces,
-       target_runtime: "es2022"
-     }
-   });
-   ```
-3. **Local Simulation Harness**:
-   Export recovered cryptographic routines into a standalone Node.js script. Mock required browser globals (`window`, `navigator`, `crypto.subtle`) to ensure reproducible execution without an active browser.
+Other domains exist (Frida bridge, ADB, native emulator `nemu_*`, process memory, syscall hooks). They overlap with dedicated tools in this skill; prefer [frida.md](frida.md) and the native workflows for those targets.
 
 ---
 
-## 6. Boundaries & Operational Rules
+## 5. Workflow: request signature recovery
 
-Adhere strictly to the operational hierarchy when executing reverse engineering tasks:
+Calls below are MCP tool invocations written as `tool {json args}`. They are not JavaScript.
 
-### Operational Hierarchy
 ```text
-Observe-first ──► Hook-preferred ──► Breakpoint-last ──► Rebuild-oriented
-```
-1. **Observe-first**: Always inspect network requests, loaded scripts, and DOM state passively before injecting code or setting traps. Premature intervention triggers anti-bot and anti-debugging countermeasures.
-2. **Hook-preferred**: Favor non-invasive function monkey-patching and wrapper hooks over execution-halting breakpoints. Hooks allow the application to maintain its natural timing and complete asynchronous workflows.
-3. **Breakpoint-last**: Use breakpoints (`break_on_xhr`, `set_breakpoint_on_text`) only when an exact call stack or volatile scope object cannot be captured via hooks. Always resume execution promptly to avoid timing out background workers or WebSocket heartbeats.
-4. **Rebuild-oriented**: Reverse engineering is not complete until the recovered logic is synthesized into a clean, standalone, testable implementation (AST deobfuscated or local harness).
+# 0. Discover and activate
+search_tools {"query": "browser launch navigate"}
+search_tools {"query": "xhr breakpoint call stack"}
 
-### Critical Operational Constraints
-- **Strict Parameter Discovery**: NEVER guess tool parameters or pass fabricated arguments. When using `MCP_TOOL_PROFILE=search`, ALWAYS execute `describe_tool({ tool_name: "..." })` to obtain the verified JSON schema prior to invocation.
-- **Process Isolation**: Treat all untrusted target scripts as potentially hostile. When executing string array un-packing routines, enforce execution timeouts and isolated sandboxing (`sandbox_timeout_ms`).
-- **Clean Disconnect**: Always terminate detached pages and release CDP sessions upon task completion to prevent memory exhaustion in the shared Chromium instance.
+# 1. Observe passively
+browser_launch {"driver": "chrome", "headless": true}
+page_navigate {"url": "https://target.example/login", "waitUntil": "networkidle", "enableNetworkMonitoring": true}
+network_get_requests {"urlRegex": "/api/.*/auth", "tail": 20}
+network_get_response_body {"requestId": "<id from previous result>"}
+get_all_scripts {"includeSource": false}
+search_in_scripts {"keyword": "sign|hmac|nonce|x-signature", "isRegex": true, "contextLines": 3, "maxMatches": 20}
+
+# 2. Defuse anti-debug before breaking
+antidebug_detect_protections {}
+antidebug_bypass {"types": ["debugger_statement", "timing"], "persistent": true}
+
+# 3. Break where the request is sent and read the stack
+debugger_lifecycle {"action": "enable"}
+blackbox_add_common {}
+breakpoint {"action": "set", "type": "xhr", "urlPattern": "/api/v2/auth"}
+page_evaluate {"code": "document.querySelector('form').requestSubmit()"}
+debugger_wait_for_paused {"timeout": 15000}
+get_call_stack {}
+debugger_evaluate {"context": "frame", "callFrameId": "<frame id of the signer>", "expression": "JSON.stringify(arguments)"}
+debugger_resume {}
+
+# 4. Replace the breakpoint with a hook and collect many samples
+manage_hooks {"action": "create", "type": "function", "target": "window.AuthClient.prototype.sign", "hookAction": "log"}
+manage_hooks {"action": "records"}
+```
+
+Then pull the signer source with `get_script_source` (narrow `startLine`/`endLine`), deobfuscate it (section 7), and reimplement it in a standalone script. Compare your output against captured requests byte for byte.
+
+---
+
+## 6. Workflow: dynamic code and crypto capture
+
+```text
+hook_preset {"presets": ["eval", "function-constructor", "atob-btoa", "crypto-subtle"], "captureStack": true, "method": "evaluateOnNewDocument"}
+hook_preset {"preset": "crypto-key-capture", "method": "evaluateOnNewDocument"}   # forces extractable:true on importKey
+page_navigate {"url": "https://target.example/", "waitUntil": "networkidle"}
+console_get_logs {"limit": 200}
+js_heap_search {"pattern": "BEGIN PUBLIC KEY|eyJhbGci"}
+```
+
+`evaluateOnNewDocument` installs hooks before page scripts run. `evaluate` only affects code that runs after injection.
+
+WebSocket protocols:
+
+```text
+ws_monitor {"action": "enable", "urlFilter": "wss://"}
+ws_get_frames {"direction": "sent", "limit": 50}
+```
+
+WASM cores:
+
+```text
+hook_preset {"preset": "webassembly-full", "method": "evaluateOnNewDocument"}
+page_navigate {"url": "https://target.example/app", "waitUntil": "networkidle"}
+wasm_dump {"moduleIndex": 0, "outputPath": "/abs/work/mod0.wasm"}
+wasm_decompile {"inputPath": "/abs/work/mod0.wasm", "outputPath": "/abs/work/mod0.dcmp"}
+```
+
+Analyze the dumped `.wasm` offline afterward (`wasm2wat`, `wasm-decompile`, Ghidra with a WASM loader).
+
+---
+
+## 7. Workflow: deobfuscation and JSVMP
+
+```text
+detect_obfuscation {"code": "<source>", "generateReport": true}
+deobfuscate {"code": "<source>", "engine": "auto", "unpack": true, "unminify": true, "outputDir": "/abs/work/deob"}
+analysis_decode_string_array {"code": "<source>", "removeRotation": true}
+analysis_deflat_control_flow {"code": "<source>", "removeDispatcher": true}
+js_analyze_vm {"code": "<vm source>", "extractBytecode": true, "mapOpcodes": true}
+js_deobfuscate_jsvmp {"code": "<vm source>", "extractInstructions": true}
+sourcemap_discover {"includeInline": true}
+sourcemap_reconstruct_tree {"sourceMapUrl": "<map url>", "outputDir": "/abs/work/src", "inferMissing": true}
+```
+
+Pass large sources by file where a tool accepts `outputDir`/`inputPath`. Pasting a 2 MB bundle into `code` costs the whole context. Prefer running `webcrack` locally on the saved bundle and sending only the hot function to jshook.
+
+For JSVMP, the reliable path is trace first, lift second: hook the dispatcher's handler call (`manage_hooks` with `customCode`, or `ai_hook` `inject`) to log `(pc, opcode, stack top)`, collect a trace for one known input, map opcodes to semantics, then use `js_analyze_vm`/`js_deobfuscate_jsvmp` output as a starting point. Validate any lifted code by replaying the same input and comparing results.
+
+---
+
+## 8. Rules and pitfalls
+
+- **Observe → hook → break → rebuild.** Passive capture first. Hooks keep timing intact. Breakpoints last; resume quickly or heartbeats and workers time out.
+- **Schema drift.** Tool names and arguments here match 0.4.3. Call `describe_tool` once per tool per session. Pin the version in the MCP config.
+- **`call_tool` does not activate.** Activate with `search_tools` (auto) or `activate_tools` first.
+- **Hook timing.** Use `method: "evaluateOnNewDocument"` for anything that must run before page code.
+- **Anti-debug side effects.** `antidebug_bypass` patches page globals; some sites detect the patch. Verify with `stealth_verify` and compare behavior with and without it.
+- **Isolation.** Treat target pages as hostile. Run the browser in a disposable profile (`userDataDir` under the work dir) and, for malicious pages, inside a VM ([utm-hypervisor.md](utm-hypervisor.md)).
+- **HTTP daemon exposure.** Keep `MCP_HOST=127.0.0.1`. Set `MCP_AUTH_TOKEN` before any other bind. The server can drive a browser and read memory.
+- **Clean up.** `browser_close` at the end. Export evidence (`network_export_har`, hook records) to files before closing.
+
+---
+
+## 9. Verification checklist
+
+- `search_tools` returns the tool you plan to call, and `describe_tool` shows the arguments you pass.
+- Captured request count and bodies match what the page sent (`network_export_har` diff against a mitmproxy capture if needed).
+- Reimplemented signer reproduces at least three captured signatures from their inputs.
+- Hook records show `captureStack` frames pointing into the script and line you reversed.

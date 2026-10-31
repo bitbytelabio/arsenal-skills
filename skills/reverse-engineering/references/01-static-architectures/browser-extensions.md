@@ -1,731 +1,287 @@
-# Browser Extension Architecture & Reverse Engineering
+# Browser Extension Reverse Engineering
 
-## 1. Title & Overview
-- **Domain**: Chromium (Google Chrome, Microsoft Edge, Brave, Opera) and Gecko (Mozilla Firefox) browser extensions packaged as `.crx` or `.xpi` archives.
-- **Scope**: Manifest V2 vs Manifest V3 specification differences, CRX2/CRX3 package format unpacking, service workers vs persistent background pages, `declarativeNetRequest` rules versus dynamic `webRequest`, content script execution environments (isolated worlds, DOM sharing vulnerabilities), message-passing IPC boundaries (`chrome.runtime.sendMessage`, `onMessageExternal`, native messaging), professional JavaScript AST deobfuscation pipelines for obfuscated extension payloads (Obfuscator.io string array decoding, proxy function inlining, constant folding, property accessor normalization, control-flow unflattening), and JavaScript Virtual Machine Protection (JSVMP) devirtualization in background workers and content scripts.
+## When To Open
+Open this file for a `.crx` (`Cr24`), an `.xpi`, a Safari `.appex`, an unpacked folder with `manifest.json`, or a profile `Extensions/` directory. JavaScript deobfuscation, bundle unpacking, source maps, JSVMP, and CDP script capture are in [browser-js-wasm.md](browser-js-wasm.md). Live hooking with the jshook MCP server is [jshook-mcp.md](../04-tool-usage/jshook-mcp.md).
 
----
+## Order Of Work
+1. **Acquire and hash.** Keep the original `.crx`/`.xpi`. Record SHA-256 and the version from the manifest.
+2. **Parse the container.** CRX3 header, extension ID, signing proofs. Then the ZIP.
+3. **Read the manifest before any JS.** Permissions, host permissions, background, content scripts, `externally_connectable`, `web_accessible_resources`, CSP, DNR rulesets, `update_url`.
+4. **Map contexts and messages.** Who can send what to whom. That map is the attack surface and the data-flow graph.
+5. **Read the privileged sinks.** `chrome.cookies`, `chrome.scripting.executeScript`, `chrome.tabs`, `chrome.webRequest`, `chrome.declarativeNetRequest.updateDynamicRules`, `fetch`, `chrome.runtime.connectNative`.
+6. **Deobfuscate only where the sinks are.** See [browser-js-wasm.md](browser-js-wasm.md).
+7. **Load it in a lab profile only after static analysis.** Section "Dynamic".
 
-## 2. Trigger Conditions & Detection Indicators
-Engage this reference when analyzing browser extensions, web security add-ons, suspicious browser plugins, or obfuscated extension payloads:
+## Acquisition
 
-### Package Formats & Magic Bytes
-- **Chrome Extension Package (`.crx`)**:
-  - Magic bytes: `Cr24` (`\x43\x72\x32\x34` / `0x34327243`).
-  - Format versions:
-    - CRX2 (Legacy): Version `2` (magic followed by `0x00000002`, public key len, signature len, ZIP payload).
-    - CRX3 (Current): Version `3` (magic followed by `0x00000003`, 4-byte header length, protobuf header containing public key proofs, followed directly by standard PKZIP payload).
-- **Firefox Extension Package (`.xpi`)**:
-  - Standard PKZIP archive (`PK\x03\x04` / `0x04034B50`).
-- **Core Manifest File**:
-  - `manifest.json` at root directory.
-  - Manifest Version indicator: `"manifest_version": 2` or `"manifest_version": 3`.
+```bash
+# Chrome Web Store CRX (verified 2026-10 with uBlock Origin Lite). prodversion must be a recent Chrome version.
+EXT_ID=ddkjiahejlhfcafbddmgiahcphecmpfh
+curl -sSL -o "$EXT_ID.crx" \
+  "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=140.0&acceptformat=crx2,crx3&x=id%3D${EXT_ID}%26uc"
+file "$EXT_ID.crx"          # "Google Chrome extension, version 3"
 
-### Obfuscation & Evasion Indicators in Extensions
-- **Obfuscator.io / JavaScript-Obfuscator Patterns**:
-  - High entropy `.js` files in `content_scripts` or `background.service_worker`.
-  - Scrambled global string array declarations: `var _0x2a1b = ['cookie', 'getAll', ...];`.
-  - Self-executing rotation loops with `while (--_0xcount)` or `parseInt` checksums.
-  - Hexadecimal identifier mangling: `_0x1a2b`, `_0x4f2a`.
-  - Obfuscated API calls designed to evade Chrome Web Store static scanners: `chrome[_0x1a(0x0)][_0x1a(0x1)]` instead of `chrome.cookies.getAll`.
-  - Control-Flow Flattening (CFF) state machine dispatch loops: `while (true) switch (_0xorder[_0xidx++])`.
-- **JSVMP (JavaScript Virtual Machine Protection) Patterns**:
-  - Encrypted bytecode strings or typed byte arrays (`Uint8Array`) embedded in background service workers or content scripts.
-  - Custom virtual execution loop containing Virtual PC (`vpc`), operand stack (`stack = []`), and central `switch (opcode)` dispatcher.
-  - Virtualized API calls executing dynamic reflection (`window[v1][v2].apply(...)`) to hide credential exfiltration, token theft, and DOM scraping.
+# Firefox AMO XPI by slug (verified with ublock-origin).
+SLUG=ublock-origin
+curl -sSL -o "$SLUG.xpi" "https://addons.mozilla.org/firefox/downloads/latest/${SLUG}/latest.xpi"
 
----
-
-## 3. Tooling & CLI/MCP Actions
-
-### CRX & XPI Unpackers
-- **Python Carving & Unpacking**:
-  ```bash
-  # Carve embedded ZIP payload from CRX3 package and extract
-  python3 unpack_crx.py target_extension.crx
-  ```
-- **CLI Utilities**:
-  ```bash
-  # Unzip Firefox XPI archive
-  unzip extension.xpi -d ./unpacked_extension
-  ```
-
-### AST Deobfuscation Ecosystem
-- **Babel AST Toolchain**:
-  - `@babel/parser`: Parses obfuscated extension scripts into ESTree AST.
-  - `@babel/traverse`: Traverses and manipulates AST paths, scopes, and bindings.
-  - `@babel/generator`: Emits clean, readable JavaScript code.
-  - `@babel/types`: AST node validation, inspection, and creation.
-  ```bash
-  npm install --save-dev @babel/parser @babel/traverse @babel/generator @babel/types
-  ```
-- **Automated Deobfuscators**:
-  - `webcrack`: Deobfuscates Obfuscator.io patterns and inlines proxy functions.
-    ```bash
-    npx webcrack ./unpacked_extension/content.js -o ./deobfuscated_src
-    ```
-  - `wakaru`: Modern unbundler and decompiler for minified modules.
-    ```bash
-    npx @wakaru/cli unminify ./unpacked_extension/background.js -o ./clean_bg
-    ```
-  - `synchrony`: Specialized AST cleaner for JavaScript-Obfuscator rules.
-    ```bash
-    npx synchrony deobfuscate ./unpacked_extension/payload.js
-    ```
-
-### Live Extension Inspection & Dynamic Instrumentation
-- **JSHook MCP (`@jshookmcp/jshook`)**: Dedicated automated reverse engineering suite providing CDP session debugging, Chrome Extension background Service Worker inspection (`select_page`, `select_frame`), content script DOM hook injection, and dynamic request initiator tracing. Complete usage patterns, 5-phase workflows, and boundaries are documented in [04-tool-usage/jshook-mcp.md](../04-tool-usage/jshook-mcp.md).
-- **Chrome Developer Tools**:
-  - Navigate to `chrome://extensions`, enable "Developer mode".
-  - Click "Load unpacked" and select the extension directory.
-  - Click "Inspect views: service worker" to open dedicated DevTools for background logic.
-- **Chrome DevTools Protocol (CDP) & Playwright**:
-  - Launch Chromium with extension loaded and remote debugging enabled:
-    ```bash
-    google-chrome --remote-debugging-port=9222 --load-extension=./unpacked_extension --disable-extensions-except=./unpacked_extension
-    ```
-  - Attach Playwright or Puppeteer via CDP to capture dynamic JSVMP bytecode traces and decrypt runtime parameters.
----
-
-## 4. Core Methodologies & Step-by-Step Technical Workflow
-
-### 4.1 Manifest V2 vs Manifest V3 Architecture Comparison
-Manifest V3 (MV3) fundamentally altered extension persistence and network manipulation capabilities:
-
-| Feature / Capability | Manifest V2 (Legacy) | Manifest V3 (Current Standard) | Security Implication |
-| :--- | :--- | :--- | :--- |
-| **Background Execution** | Persistent background pages (`background.scripts` / HTML) | Ephemeral background **Service Workers** (`background.service_worker`) | State cannot be stored in global variables; worker terminates after 30s idle timeout |
-| **Network Interception** | `chrome.webRequest` (blocking API allows arbitrary inspection/modification) | `chrome.declarativeNetRequest` (DNR: declarative regex rules evaluated by browser) | Extensions cannot inspect request body plaintext unless using non-blocking observation |
-| **Remote Code Execution** | Permitted via `eval()`, `new Function()`, or loading external scripts | **Strictly forbidden**; all executable code must be locally packaged in the CRX | Obfuscators cannot dynamically fetch C2 payloads from remote servers; malware relies on JSVMP |
-| **Host Permissions** | Combined into `"permissions"` array | Split into `"permissions"` (APIs) and `"host_permissions"` (domains) | Finer privilege scoping |
-
----
-
-### 4.2 Extension Execution Contexts & The Trust Boundary
-An extension operates across multiple isolated contexts with varying privileges:
-
-```text
-┌────────────────────────────────────────────────────────┐
-│                   Untrusted Web Page                   │
-│   (DOM, window, global JavaScript variables, cookies)   │
-└───────────────────────────┬────────────────────────────┘
-                            │ DOM Events / postMessage
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                     Content Script                     │
-│  - Isolated World (private JS variables, shared DOM)   │
-│  - Access to subset of chrome.runtime APIs             │
-│  - Can communicate with background service worker      │
-└───────────────────────────┬────────────────────────────┘
-                            │ chrome.runtime.sendMessage
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│              Background Service Worker                 │
-│  - Privileged API access: chrome.cookies, tabs, storage│
-│  - declarativeNetRequest rules engine                  │
-│  - Arbitrary network requests (fetch / CORS bypass)    │
-└───────────────────────────┬────────────────────────────┘
-                            │ Native Messaging Host (stdin/stdout)
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                 Local Host Executable                  │
-│   (Native binary running with local user privileges)   │
-└────────────────────────────────────────────────────────┘
+# Edge Add-ons (format from Edge update service; not verified here).
+curl -sSL -o "$EXT_ID.crx" \
+  "https://edge.microsoft.com/extensionwebstorebase/v1/crx?response=redirect&x=id%3D${EXT_ID}%26installsource%3Dondemand%26uc"
 ```
 
-#### The Two Critical Attack Surfaces:
-1. **Web Page ↔ Content Script Interface**:
-   - Although the Content Script executes in an *Isolated World* (preventing the page from accessing `chrome.*` APIs directly), it shares the same DOM tree and listens to `window.postMessage`.
-   - If a content script accepts unvalidated `postMessage` data without verifying `event.origin`, an untrusted web page can trigger content script actions.
-2. **Content Script ↔ Background Service Worker Interface**:
-   - The content script sends IPC messages to the background worker using `chrome.runtime.sendMessage`.
-   - The background worker receives these via `chrome.runtime.onMessage.addListener((message, sender, sendResponse) => { ... })`.
-   - **Vulnerability Pattern**: If the background script performs a privileged action (e.g., calling `chrome.cookies.getAll`, deleting files, or making cross-origin requests) based purely on `message.action` without checking `sender.id` or `sender.url`, a malicious web page can exploit the content script to abuse background privileges.
+Installed extensions are already unpacked:
 
----
+| Browser / OS | Path |
+| :--- | :--- |
+| Chrome macOS | `~/Library/Application Support/Google/Chrome/<Profile>/Extensions/<id>/<version>_0/` |
+| Chrome Linux | `~/.config/google-chrome/<Profile>/Extensions/<id>/<version>_0/` |
+| Chrome Windows | `%LOCALAPPDATA%\Google\Chrome\User Data\<Profile>\Extensions\<id>\<version>_0\` |
+| Chrome state (same profile) | `Local Extension Settings/<id>/` (LevelDB, `chrome.storage.local`), `Sync Extension Settings/`, `Managed Extension Settings/`, `DNR Extension Rules/`, `Extension Cookies` |
+| Chrome policy installs | `Preferences` / `Secure Preferences` JSON, policy `ExtensionInstallForcelist` |
+| Firefox | `<profile>/extensions/<gecko-id>.xpi`; storage in `<profile>/storage/default/moz-extension+++<uuid>/` |
+| Safari | `<App>.app/Contents/PlugIns/<Name>.appex/Contents/Resources/` (manifest and JS) |
 
-### 4.3 Auditing `manifest.json` for Privilege Creep
-Always inspect the permissions map before auditing JavaScript source:
+`<Profile>` is `Default`, `Profile 1`, and so on. Edge and Brave use the same layout under their own vendor directory.
 
-```json
-{
-  "manifest_version": 3,
-  "name": "Target Extension",
-  "version": "1.0.0",
-  "permissions": [
-    "cookies",
-    "storage",
-    "declarativeNetRequest",
-    "scripting",
-    "nativeMessaging"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://*/*", "http://*/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "externally_connectable": {
-    "matches": ["https://partner-portal.com/*"]
-  }
-}
-```
+## CRX Format
+All integers are little-endian.
 
-#### High-Risk Permission Indicators:
-- `<all_urls>` or `*://*/*`: Unrestricted cross-origin network access and DOM injection across every visited site.
-- `cookies`: Ability to read and exfiltrate authentication session tokens for any domain covered by `host_permissions`.
-- `scripting`: Ability to inject arbitrary JavaScript directly into any tab (`chrome.scripting.executeScript`).
-- `nativeMessaging`: Ability to spawn and exchange JSON messages with an executable binary installed on the operating system.
-- `externally_connectable`: Allows external web pages matching the origin pattern to send direct messages to `chrome.runtime.onMessageExternal`.
+| Offset | CRX3 | CRX2 (legacy, rejected by current Chrome) |
+| :--- | :--- | :--- |
+| 0 | `Cr24` (`43 72 32 34`) | `Cr24` |
+| 4 | `u32 version = 3` | `u32 version = 2` |
+| 8 | `u32 header_size` | `u32 pubkey_len`, `u32 sig_len` |
+| 12 | `CrxFileHeader` protobuf, `header_size` bytes | public key, then signature |
+| 12 + header_size | ZIP archive | ZIP at `16 + pubkey_len + sig_len` |
 
----
+`CrxFileHeader` (Chromium `components/crx_file/crx3.proto`):
 
-### 4.4 DeclarativeNetRequest Rules vs `webRequest`
-In Manifest V3, blocking network manipulation is defined through JSON rule sets:
-- Inspect `manifest.json` for `"declarative_net_request"` rule dictionary.
-- Review rule definitions:
-  ```json
-  [
-    {
-      "id": 1,
-      "priority": 1,
-      "action": { "type": "block" },
-      "condition": { "urlFilter": "||analytics.tracker.com", "resourceTypes": ["script"] }
-    },
-    {
-      "id": 2,
-      "priority": 2,
-      "action": {
-        "type": "modifyHeaders",
-        "requestHeaders": [
-          { "header": "Authorization", "operation": "set", "value": "Bearer EXFILTRATED_TOKEN" }
-        ]
-      },
-      "condition": { "urlFilter": "||api.target.com" }
-    }
-  ]
-  ```
-- **Reversing Action**: Check rules for header injection, redirection to malicious hosts (`type: "redirect"`), or stripping of security headers (e.g., removing `Content-Security-Policy` or `X-Frame-Options`).
+| Field | Number | Content |
+| :--- | :--- | :--- |
+| `sha256_with_rsa` | 2 | repeated `AsymmetricKeyProof { public_key = 1 (X.509 SPKI DER); signature = 2 }` |
+| `sha256_with_ecdsa` | 3 | repeated `AsymmetricKeyProof`, P-256 |
+| `verified_contents` | 4 | gzip'd verified-contents JSON (optional) |
+| `signed_header_data` | 10000 | bytes of `SignedData { crx_id = 1 (16 bytes) }` |
 
----
+Signatures cover `"CRX3 SignedData\x00" + u32le(len(signed_header_data)) + signed_header_data + zip`.
 
-### 4.5 Auditing Native Messaging Hosts
-Extensions with `nativeMessaging` permissions communicate over standard I/O with a local executable:
-1. Locate the Native Messaging Host manifest file:
-   - Linux: `~/.config/google-chrome/NativeMessagingHosts/<name>.json`
-   - macOS: `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/<name>.json`
-   - Windows: Registry key `HKEY_CURRENT_USER\Software\Google\Chrome\NativeMessagingHosts\<name>`
-2. Inspect the JSON host manifest:
-   ```json
-   {
-     "name": "com.target.native_host",
-     "description": "Native Host Helper",
-     "path": "/usr/local/bin/target_host",
-     "type": "stdio",
-     "allowed_origins": ["chrome-extension://abcdefghijklmnopqrstuvwxyz/"]
-   }
-   ```
-3. Extract and reverse engineer the native binary located at `path` using IDA Pro or Ghidra (`native-cpp-abi.md`). Trace the message framing protocol: 4-byte little-endian message length prefix followed by UTF-8 JSON.
+- **Extension ID.** First 16 bytes of SHA-256 over the developer public key (DER SPKI), hex digits `0-f` mapped to `a-p`. It equals `crx_id`.
+- **Several proofs is normal.** A Web Store CRX carries the developer RSA proof plus Web Store RSA and ECDSA proofs. Only one key hashes to `crx_id`. Verified on uBlock Origin Lite: three proofs, one matching.
+- **The ZIP.** `unzip` accepts a CRX with a warning about extra leading bytes. Python `zipfile` accepts it too. A strict tool needs the slice from `12 + header_size`.
+- **`_metadata/verified_contents.json`.** Web Store content hashes for each file. Chrome uses it to detect on-disk tampering ("This extension may have been corrupted").
 
----
+Parser and extractor. Verified on a Web Store CRX3; stdlib only.
 
-### 4.6 Reversing Obfuscated Extension Scripts with Babel AST Pipelines
-Malicious extensions bypass Chrome Web Store automated scanners by hiding API invocations behind Obfuscator.io layers. Standard string search for `chrome.cookies` or `fetch` fails because they are represented as `chrome[_0x1a2b(0x10)][_0x1a2b(0x11)]`.
-
-```text
-┌────────────────────────────────────────────────────────┐
-│            Obfuscated Extension Script                 │
-│      (content.js / background.js / injected.js)        │
-└───────────────────────────┬────────────────────────────┘
-                            │
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│             Babel AST Deobfuscation Pipeline           │
-│                                                        │
-│  1. String Array Extraction & VM Sandbox Rotation      │
-│  2. Inlining CallExpression String Lookups             │
-│  3. Proxy Function Inlining (Operators & Calls)        │
-│  4. Constant Folding & Dead-Code Branch Pruning        │
-│  5. Property Accessor Normalization                    │
-│     (window['chrome']['cookies'] -> chrome.cookies)    │
-│  6. Control-Flow Unflattening (CFF State Machine)      │
-└───────────────────────────┬────────────────────────────┘
-                            │
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│            Deobfuscated JavaScript & API Audit         │
-│  - Direct chrome.* API surface mapping                 │
-│  - Unmasked C2 exfiltration endpoints & webhooks       │
-│  - Clean logic for manual or automated auditing        │
-└────────────────────────────────────────────────────────┘
-```
-
-#### Key Transformation Phases:
-1. **String Array Extraction & Sandbox Rotation**:
-   - Top-level array declaration + rotation IIFE + helper lookup function.
-   - Run the extracted three nodes inside a Node.js `vm.createContext({})` sandbox.
-   - Replace all `CallExpression` occurrences of `_0xget(0x12)` with the concrete string value returned by the sandbox helper.
-   - Remove the array, rotation routine, and helper function AST nodes.
-2. **Proxy Function Inlining**:
-   - Detect functions returning a single binary expression (`a + b`, `a === b`) or call expression (`fn(a, b)`).
-   - Inline the operations at all call sites and remove the proxy function declarations.
-3. **Dead-Code Pruning & Constant Folding**:
-   - Evaluate constant expressions via `path.evaluate()`.
-   - Prune dead conditional blocks (`if (false) { ... }`, ternary branches) injected to confuse static analyzers.
-4. **Property Accessor Normalization**:
-   - Convert bracket access notation `chrome['cookies']['getAll']` into dot notation `chrome.cookies.getAll`.
-   - This step is critical for automated security scanning: static pattern matchers and regex rules can now detect sensitive API access.
-5. **Control-Flow Unflattening (CFF)**:
-   - Identify `while (true) switch (_0xorder[_0xidx++])` state machines.
-   - Parse the `'3|1|0|2'.split('|')` execution array.
-   - Reorder switch case basic blocks into linear sequential statements.
-
----
-
-### 4.7 JSVMP (JavaScript Virtual Machine Protection) Devirtualization in Extensions
-Advanced extension malware utilizes JSVMP inside background service workers to execute arbitrary logic without violating Manifest V3's strict prohibition against remote `eval()` / `new Function()`. The extension packages an embedded bytecode interpreter and a proprietary bytecode payload.
-
-#### Architectural Components:
-1. **Bytecode Stream**: Stored as a packed array or base64 string inside the extension package.
-2. **Virtual Registers**: Virtual PC (`vpc`), stack pointer (`vsp`), flag registers.
-3. **Operand Stack**: Array managing temporary values and arguments (`stack = []`).
-4. **Opcode Dispatcher**: Infinite loop with a `switch` statement executing custom bytecode instructions.
-
-#### 3-Step Devirtualization Workflow:
-1. **Step 1: Static Analysis of Interpreter Loop & Opcode Table**:
-   - Locate the dispatcher loop in the background script.
-   - Map opcode IDs to operations:
-     - `0x01`: Push immediate / string constant to stack.
-     - `0x02`: Pop two values, perform binary operation (add, concat, compare), push result.
-     - `0x03`: Resolve object property (`obj[prop]`).
-     - `0x04`: Call function with arguments (`fn.apply(ctx, args)`).
-     - `0x05`: Jump / Conditional Jump (`vpc = target`).
-2. **Step 2: Dynamic Trace-Based Analysis & JSHook MCP Integration**:
-   - **JSHook MCP Session Attachment**: In MV3, background service workers operate in isolated target contexts. Use JSHook MCP to select the service worker target and inspect or hook its execution:
-     ```javascript
-     // Attach to extension service worker target
-     call_tool({
-         tool_name: "select_page",
-         arguments: { target_id: "service_worker_target_id" }
-     });
-     // Hook interpreter dispatcher in service worker
-     call_tool({
-         tool_name: "install_function_hook",
-         arguments: {
-             page_id: "service_worker_target_id",
-             target_object: "self",
-             method_name: "vmp_step",
-             hook_code: `
-                 self.__sw_vmp_trace__ = self.__sw_vmp_trace__ || [];
-                 const orig = self.vmp_step;
-                 self.vmp_step = function(op, vpc, stack) {
-                     self.__sw_vmp_trace__.push({ op, vpc, stackTop: stack ? stack.slice(-2) : [] });
-                     return orig.apply(this, arguments);
-                 };
-             `
-         }
-     });
-     ```
-   - **Content Script DOM Hook Injection**: For content scripts executing in isolated worlds, inject stealth hooks via `evaluate_script` or `install_function_hook` to intercept shared DOM access, message-passing boundaries (`chrome.runtime.sendMessage`), and exfiltration triggers.
-   - **CDP or Playwright Hooking**: Alternatively, attach via raw CDP to log each `(vpc, opcode, stack, operands)` event to a structured JSON file.
-   - Trigger extension functionality (e.g., visit a sensitive website or simulate message IPC).
-3. **Step 3: AST Generation from VM Trace**:
-   - Feed the dynamic execution trace into a symbolic stack evaluator or JSHook MCP's `VMDeobfuscator`.
-   - Reconstruct JavaScript AST nodes for each virtual instruction (pushing literals, building expressions, resolving member access, creating call expressions).
-   - Output clean JavaScript demonstrating the exact sequence of actions executed by the virtual machine.
-
-#### Tooling Ecosystem Matrix:
-| Tool | Core Capability | Best Suited For | Limitation |
-| :--- | :--- | :--- | :--- |
-| **`webcrack`** | Webpack unbundling, Obfuscator.io deobfuscation | Extension content scripts, background bundles | Does not devirtualize complex custom JSVMP |
-| **`wakaru`** | TypeScript construct recovery, variable un-mangling | Clean output formatting, module restructuring | Target must not use heavy virtualization |
-| **`synchrony`** | Semantic AST deobfuscator for Obfuscator.io | Control flow unflattening, string array rotation | Tuned specifically for JS-Obfuscator rules |
-| **Babel Custom Script** | Custom AST transformation rules | Tailored extension deobfuscation & API auditing | Requires manual pattern identification |
-| **JSHook MCP (`@jshookmcp/jshook`)** | Automated CDP Service Worker inspection, DOM hooking, `VMDeobfuscator` | Full MV2/MV3 dynamic analysis, JSVMP reversing, AST cleaning | Requires Node.js MCP runtime (see [04-tool-usage/jshook-mcp.md](../04-tool-usage/jshook-mcp.md)) |
-| **CDP Service Worker Hook** | Dynamic opcode trace extraction | JSVMP bytecode reversing in Service Workers | Requires Chromium runtime environment |
-
----
-
-## 5. Concrete Code & Script Examples
-
-### Python CRX3 Unpacker & Manifest Security Auditor
 ```python
-import struct
-import sys
-import zipfile
-import io
-import json
+# crx_unpack.py: uv run crx_unpack.py ext.crx [out_dir]
+import hashlib, io, json, struct, sys, zipfile
 
-def unpack_and_audit_crx(crx_path):
-    with open(crx_path, "rb") as f:
-        data = f.read()
+def varint(b, i):
+    v = s = 0
+    while True:
+        c = b[i]; i += 1; v |= (c & 0x7F) << s; s += 7
+        if c < 0x80: return v, i
 
-    # Check magic: Cr24 (0x34327243)
-    if data[:4] != b"Cr24":
-        print("[-] Not a valid CRX package.")
-        return
+def fields(b):                      # minimal protobuf walker: (field_no, bytes) for length-delimited fields
+    i = 0
+    while i < len(b):
+        key, i = varint(b, i)
+        no, wt = key >> 3, key & 7
+        if wt == 2:
+            n, i = varint(b, i); yield no, b[i:i + n]; i += n
+        elif wt == 0: _, i = varint(b, i)
+        else: raise ValueError(f"wire type {wt}")
 
-    version = struct.unpack_from("<I", data, 4)[0]
-    print(f"[+] Found CRX package (Format Version: {version})")
+def ext_id(raw16):
+    return "".join(chr(ord("a") + int(h, 16)) for h in raw16.hex())
 
-    # Locate inner ZIP archive (PK\x03\x04)
-    zip_offset = data.find(b"PK\x03\x04")
-    if zip_offset == -1:
-        print("[-] Embedded PKZIP archive not found.")
-        return
-
-    print(f"[+] Carving ZIP payload from byte offset 0x{zip_offset:X}...")
-    zip_bytes = data[zip_offset:]
-    
-    try:
-        z = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    except Exception as e:
-        print(f"[-] Failed to parse carved ZIP: {e}")
-        return
-
-    print(f"[+] Successfully opened ZIP archive ({len(z.namelist())} files).")
-
-    # Read and audit manifest.json
-    if "manifest.json" in z.namelist():
-        manifest_raw = z.read("manifest.json").decode("utf-8", errors="ignore")
-        manifest = json.loads(manifest_raw)
-        
-        print("\n=== EXTENSION MANIFEST AUDIT ===")
-        print(f"Name:             {manifest.get('name')}")
-        print(f"Manifest Version: {manifest.get('manifest_version')}")
-        print(f"Permissions:      {manifest.get('permissions', [])}")
-        print(f"Host Permissions: {manifest.get('host_permissions', [])}")
-        
-        # Check background context
-        bg = manifest.get("background", {})
-        if "service_worker" in bg:
-            print(f"Background:       Service Worker ({bg['service_worker']})")
-        elif "scripts" in bg:
-            print(f"Background:       Persistent Scripts ({bg['scripts']})")
-
-        # Check content scripts
-        cs = manifest.get("content_scripts", [])
-        print(f"Content Scripts:  {len(cs)} rule(s) defined")
-        for idx, rule in enumerate(cs):
-            print(f"  [{idx}] Matches: {rule.get('matches')} -> JS: {rule.get('js')}")
-
-        # Check externally connectable
-        ec = manifest.get("externally_connectable", {})
-        if ec:
-            print(f"[!] Warning: externally_connectable defined: {ec.get('matches')}")
-
-    # Extract all files to disk
-    out_dir = "./unpacked_extension"
-    z.extractall(out_dir)
-    print(f"\n[+] Extracted full extension source tree to: {out_dir}")
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 unpack_crx.py <extension.crx>")
-        sys.exit(1)
-    unpack_and_audit_crx(sys.argv[1])
+data = open(sys.argv[1], "rb").read()
+assert data[:4] == b"Cr24", "not a CRX"
+ver = struct.unpack_from("<I", data, 4)[0]
+if ver == 3:
+    hlen = struct.unpack_from("<I", data, 8)[0]
+    zip_off = 12 + hlen
+    for no, val in fields(data[12:zip_off]):
+        if no in (2, 3):
+            key = dict(fields(val)).get(1, b"")
+            print(f"proof {'rsa' if no == 2 else 'ecdsa'}: key-derived id {ext_id(hashlib.sha256(key).digest()[:16])}")
+        elif no == 10000:
+            print("signed crx_id:", ext_id(dict(fields(val))[1]))
+elif ver == 2:
+    klen, slen = struct.unpack_from("<II", data, 8)
+    zip_off = 16 + klen + slen
+    print("crx2 id:", ext_id(hashlib.sha256(data[16:16 + klen]).digest()[:16]))
+else:
+    sys.exit(f"unknown CRX version {ver}")
+z = zipfile.ZipFile(io.BytesIO(data[zip_off:]))
+m = json.loads(z.read("manifest.json").decode("utf-8-sig"))
+print("zip at", hex(zip_off), "| files", len(z.namelist()), "| mv", m.get("manifest_version"), "|", m.get("name"), m.get("version"))
+if len(sys.argv) > 2:
+    z.extractall(sys.argv[2])       # zipfile strips ".." and absolute paths
 ```
 
----
+`__MSG_extName__` in `name` means the string is in `_locales/<default_locale>/messages.json`.
 
-### Production-Grade Node.js Babel Deobfuscator & Extension API Auditor
-This script runs a multi-pass AST deobfuscation pipeline across unpacked extension JavaScript files, normalizes property accessors to reveal hidden `chrome.*` API calls, and reports all unmasked API invocations and network endpoints.
+## Firefox XPI And Safari
+- **XPI** is a plain ZIP. AMO-signed packages contain `META-INF/manifest.mf`, `mozilla.sf`, `mozilla.rsa` (PKCS#7) and `cose.manifest`, `cose.sig`. Verified on the AMO uBlock Origin XPI.
+- **ID** comes from `browser_specific_settings.gecko.id` (legacy key `applications.gecko.id`). Unsigned XPIs install only as temporary add-ons (`about:debugging`) or on Developer Edition, Nightly, and ESR with `xpinstall.signatures.required=false`.
+- **Firefox MV3** uses `background.scripts` (event page), not a service worker. Firefox still supports MV2. Host permissions in Firefox MV3 are opt-in by the user.
+- **Native messaging in Firefox** uses `allowed_extensions` (gecko IDs) in the host manifest instead of `allowed_origins`.
+- **Safari Web Extensions** ship inside an app. JS and `manifest.json` are in the `.appex` `Resources/`. `browser.runtime.sendNativeMessage` goes to the app extension's `SafariWebExtensionHandler` (`NSExtensionRequestHandling`); reverse that Swift/ObjC code as a native target, see [mobile-ios.md](mobile-ios.md). Legacy `.safariextz` (xar) is obsolete.
 
-```javascript
-/**
- * audit_extension_ast.js
- * Multi-pass AST deobfuscator and API surface auditor for browser extensions.
- * 
- * Dependencies:
- *   npm install @babel/parser @babel/traverse @babel/generator @babel/types
- * 
- * Usage:
- *   node audit_extension_ast.js <path_to_extension_script.js> [output_clean.js]
- */
+## Manifest V2 And V3
 
-const fs = require('fs');
-const vm = require('vm');
-const parser = require('@babel/parser');
-const traverse = require('@babel/traverse').default || require('@babel/traverse');
-const generate = require('@babel/generator').default || require('@babel/generator');
-const t = require('@babel/types');
+| Area | MV2 | MV3 |
+| :--- | :--- | :--- |
+| Background | Persistent or event page (`background.scripts`/`page`) | Chrome: service worker (`background.service_worker`, optional `"type": "module"`). Firefox: event page. |
+| Network | `webRequest` + `webRequestBlocking` can read and change requests | `declarativeNetRequest` rules. `webRequest` is observe-only; `webRequestBlocking` only for policy-installed extensions. |
+| Remote code | `eval`, remote `<script>` allowed by a relaxed CSP | Remotely hosted code banned; extension-page CSP cannot allow `unsafe-eval` |
+| Hosts | Inside `permissions` | Separate `host_permissions` |
+| Injection | `tabs.executeScript` | `scripting.executeScript`, optional `world: "MAIN"` |
+| Exposed files | `web_accessible_resources: ["a.png"]` | `[{resources, matches, extension_ids, use_dynamic_url}]` |
 
-function deobfuscateExtensionScript(sourceCode) {
-    console.log('[*] Parsing extension script into AST...');
-    const ast = parser.parse(sourceCode, {
-        sourceType: 'unambiguous',
-        plugins: ['jsx']
-    });
+Chrome status: MV2 extensions are disabled for all users from Chrome 138. The `ExtensionManifestV2Availability` enterprise exemption ends in Chrome 139. Remaining MV2 items were removed from the Web Store by August 31, 2026. An MV2 CRX is now a legacy sample, an Edge/Firefox target, or an old install.
 
-    // -------------------------------------------------------------------------
-    // PASS 1: String Array Unpacking & Sandbox Rotation Decoding
-    // -------------------------------------------------------------------------
-    console.log('[*] Pass 1: Resolving string array and rotation routine...');
-    if (ast.program.body.length >= 3) {
-        const candidateNodes = ast.program.body.slice(0, 3);
-        const sandboxAst = t.program(candidateNodes);
-        const sandboxCode = generate(sandboxAst).code;
+MV3 service worker lifetime (Chrome docs): stops after 30 s idle; an event or extension API call resets the timer (Chrome 110+); a single event or API call over 5 min, or a `fetch()` response slower than 30 s, terminates it. Native messaging ports (105+), long-lived ports (114+), WebSockets (116+), and debugger sessions (118+) keep it alive. Globals do not survive; state lives in `chrome.storage` or an offscreen document.
 
-        let helperName = null;
-        const helperNode = ast.program.body[2];
-        if (t.isVariableDeclaration(helperNode) && helperNode.declarations.length > 0) {
-            helperName = helperNode.declarations[0].id.name;
-        } else if (t.isFunctionDeclaration(helperNode)) {
-            helperName = helperNode.id.name;
-        }
+How MV3 malware runs server-controlled logic without remote code:
+- Dynamic DNR rules from a server (`updateDynamicRules`): redirects, header stripping (`Content-Security-Policy`, `X-Frame-Options`), affiliate rewriting.
+- `scripting.executeScript({world: "MAIN", func, args})` with server-supplied `args`, or a content script that writes server HTML into the DOM.
+- `sandbox.pages` iframes may `eval`; the service worker passes code to them by `postMessage`.
+- `chrome.userScripts` (developer-mode or "Allow User Scripts" toggle required).
+- A JSVMP interpreter that runs a server-supplied bytecode string. See [browser-js-wasm.md](browser-js-wasm.md).
+- Delayed activation: `chrome.alarms` plus a server flag, or a check of install age in `chrome.storage`.
 
-        if (helperName) {
-            try {
-                const sandboxContext = vm.createContext({});
-                vm.runInContext(sandboxCode, sandboxContext, { timeout: 2000 });
+## Permission Risk Table
 
-                if (typeof sandboxContext[helperName] === 'function') {
-                    let inlined = 0;
-                    traverse(ast, {
-                        CallExpression(path) {
-                            if (t.isIdentifier(path.node.callee, { name: helperName })) {
-                                const args = path.node.arguments;
-                                if (args.length >= 1 && args.every(a => t.isNumericLiteral(a) || t.isStringLiteral(a))) {
-                                    const evaluatedArgs = args.map(a => a.value);
-                                    try {
-                                        const decrypted = sandboxContext[helperName](...evaluatedArgs);
-                                        if (typeof decrypted === 'string') {
-                                            path.replaceWith(t.stringLiteral(decrypted));
-                                            inlined++;
-                                        } else if (typeof decrypted === 'number') {
-                                            path.replaceWith(t.numericLiteral(decrypted));
-                                            inlined++;
-                                        }
-                                    } catch (e) {
-                                        // Ignore evaluation faults
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    console.log(`[+] Pass 1: Inlined ${inlined} obfuscated string lookups.`);
-                    ast.program.body.splice(0, 3);
-                }
-            } catch (err) {
-                console.warn(`[-] Pass 1: Sandbox rotation execution skipped (${err.message}).`);
-            }
-        }
-    }
+| Permission / key | What it grants | Read next |
+| :--- | :--- | :--- |
+| `<all_urls>`, `*://*/*` in `host_permissions` or content-script `matches` | Read/modify every page; cookie and fetch access to all hosts | Every content script and every `fetch` in the worker |
+| `cookies` (+ hosts) | Read session cookies, including `HttpOnly` | `cookies.getAll` callers and where results go |
+| `scripting` (+ hosts) | Inject code into any matching tab | `executeScript` `func`/`files`/`world` |
+| `debugger` | Full CDP on any tab: read network bodies, run JS | Every `chrome.debugger.sendCommand` |
+| `nativeMessaging` | Talk to a local executable | Host manifest and binary (section below) |
+| `webRequest` (+`webRequestBlocking` in MV2) | Observe (MV2: modify) all requests, including headers | Listener filters and `extraInfoSpec` (`requestHeaders`, `extraHeaders`) |
+| `declarativeNetRequest`, `declarativeNetRequestWithHostAccess` | Block, redirect, rewrite headers | Static rulesets and `updateDynamicRules`/`updateSessionRules` |
+| `tabs`, `history`, `topSites`, `webNavigation` | URLs and titles of browsing | What is sent off-device |
+| `management` | List, disable, uninstall other extensions | Calls that disable security extensions |
+| `proxy`, `privacy`, `contentSettings` | Route traffic, weaken settings | Proxy PAC strings and server hosts |
+| `downloads`, `downloads.open` | Write and open files | URLs and file names |
+| `clipboardRead`, `clipboardWrite` | Clipboard (crypto-address swap malware) | Offscreen document with `CLIPBOARD` reason |
+| `identity`, `identity.email` | OAuth tokens, signed-in email | Token use and destination |
+| `offscreen` | Hidden DOM document for the worker | `offscreen.createDocument` reasons |
+| `externally_connectable` | Listed sites/extensions may message the worker | `onMessageExternal` / `onConnectExternal` handlers |
+| `content_security_policy` | Relaxed CSP (MV2) | `unsafe-eval`, remote script hosts |
+| `update_url` not Google's | Self-hosted updates outside the Web Store | That server and its update XML |
 
-    // -------------------------------------------------------------------------
-    // PASS 2: Proxy Function Inlining
-    // -------------------------------------------------------------------------
-    console.log('[*] Pass 2: Inlining proxy functions...');
-    const proxyFunctions = new Map();
+## Contexts And Messaging
+Trust order, least to most: web page, content script, extension pages (popup, options, offscreen, sandbox), service worker / background, native host.
 
-    traverse(ast, {
-        FunctionDeclaration(path) {
-            const { id, params, body } = path.node;
-            if (!id || body.body.length !== 1) return;
-            const stmt = body.body[0];
-            if (!t.isReturnStatement(stmt)) return;
-            const arg = stmt.argument;
+- **Content scripts** run in an isolated world. They share the DOM, not JS globals. They can use `runtime` (`sendMessage`, `connect`, `onMessage`, `getURL`, `id`, `getManifest`), `storage`, `i18n`, and `dom`. Everything else goes through a message to the worker. A content script with `"world": "MAIN"` has no `chrome.*` access and shares globals with the page.
+- **Internal messaging.** `chrome.runtime.sendMessage(msg)` from a content script reaches `chrome.runtime.onMessage` in the worker with `sender.tab`, `sender.frameId`, `sender.url`, `sender.origin`. Worker to tab is `chrome.tabs.sendMessage(tabId, msg)`. Return `true` from the listener to keep `sendResponse` valid for an async reply.
+- **The bug pattern.** A content script relays `window.postMessage` data to the worker without checking `event.source === window` and `event.origin`. The worker then acts on `msg.action` without checking `sender.url`/`sender.origin`. Any page can then drive the worker's privileges.
+- **External messaging.** Without `externally_connectable`, other extensions can message the extension but web pages cannot. With it, only the listed `matches` (no `<all_urls>`; a second-level domain is required) and `ids` can. Pages call `chrome.runtime.sendMessage(EXT_ID, msg)`; the handler is `onMessageExternal`. Check `sender.origin` there too.
+- **`web_accessible_resources`.** Listed files load in any matching page. They fingerprint the extension (`chrome-extension://<id>/file`) unless `use_dynamic_url` is set. An accessible HTML page that reads `location.hash` or `postMessage` is a page-reachable privileged context.
+- **Extension pages** (`popup.html`, `options.html`) have full API access. `sandbox.pages` have none, but may `eval`.
 
-            if (t.isBinaryExpression(arg) &&
-                t.isIdentifier(arg.left) && t.isIdentifier(arg.right) &&
-                params.length === 2 &&
-                params[0].name === arg.left.name && params[1].name === arg.right.name) {
-                proxyFunctions.set(id.name, { kind: 'binary', operator: arg.operator, path });
-            } else if (t.isCallExpression(arg) &&
-                t.isIdentifier(arg.callee) &&
-                params.length > 0 &&
-                params[0].name === arg.callee.name) {
-                proxyFunctions.set(id.name, { kind: 'call', path });
-            }
-        }
-    });
+## Native Messaging
+1. Find the host name in `connectNative("<name>")` / `sendNativeMessage`.
+2. Locate the host manifest:
 
-    for (const [name, info] of proxyFunctions.entries()) {
-        traverse(ast, {
-            CallExpression(path) {
-                if (t.isIdentifier(path.node.callee, { name })) {
-                    if (info.kind === 'binary' && path.node.arguments.length === 2) {
-                        path.replaceWith(t.binaryExpression(info.operator, path.node.arguments[0], path.node.arguments[1]));
-                    } else if (info.kind === 'call' && path.node.arguments.length >= 1) {
-                        const targetFn = path.node.arguments[0];
-                        const callArgs = path.node.arguments.slice(1);
-                        path.replaceWith(t.callExpression(targetFn, callArgs));
-                    }
-                }
-            }
-        });
-        info.path.remove();
-    }
+| OS | Chrome location |
+| :--- | :--- |
+| macOS | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/<name>.json`, system `/Library/Google/Chrome/NativeMessagingHosts/` |
+| Linux | `~/.config/google-chrome/NativeMessagingHosts/<name>.json`, system `/etc/opt/chrome/native-messaging-hosts/` |
+| Windows | Registry `HKCU\Software\Google\Chrome\NativeMessagingHosts\<name>` (or `HKLM`), default value is the manifest path |
 
-    // -------------------------------------------------------------------------
-    // PASS 3: Constant Folding & Dead-Code Pruning
-    // -------------------------------------------------------------------------
-    console.log('[*] Pass 3: Folding constants and pruning dead branches...');
-    traverse(ast, {
-        BinaryExpression(path) {
-            const evaluated = path.evaluate();
-            if (evaluated.confident) {
-                path.replaceWith(t.valueToNode(evaluated.value));
-            }
-        },
-        IfStatement(path) {
-            const test = path.get('test');
-            const evaluated = test.evaluate();
-            if (evaluated.confident) {
-                if (evaluated.value) {
-                    if (path.node.consequent) path.replaceWith(path.node.consequent);
-                    else path.remove();
-                } else {
-                    if (path.node.alternate) path.replaceWith(path.node.alternate);
-                    else path.remove();
-                }
-            }
-        }
-    });
+3. Read `path` and `allowed_origins` (`chrome-extension://<id>/`). A wildcard or a missing origin check in the binary is a finding.
+4. Framing: each message is UTF-8 JSON preceded by a 32-bit length in native byte order (little-endian on x86/ARM). Host-to-browser messages are capped at 1 MB; browser-to-host at 64 MiB. The browser starts the host with the caller origin as an argument (`chrome-extension://<id>/`), plus `--parent-window=<hwnd>` on Windows.
+5. Reverse the host binary as a native target. Look for the `stdin` length read, the JSON dispatch on a command field, and `exec`/`CreateProcess`/file writes. See [native-cpp-abi.md](native-cpp-abi.md).
 
-    // -------------------------------------------------------------------------
-    // PASS 4: Property Accessor Normalization (Unmasking chrome.* APIs)
-    // -------------------------------------------------------------------------
-    console.log('[*] Pass 4: Normalizing property accessors (window["chrome"] -> window.chrome)...');
-    const validIdentifierRegex = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
-    traverse(ast, {
-        MemberExpression(path) {
-            const prop = path.node.property;
-            if (path.node.computed && t.isStringLiteral(prop)) {
-                if (validIdentifierRegex.test(prop.value)) {
-                    path.node.computed = false;
-                    path.node.property = t.identifier(prop.value);
-                }
-            }
-        }
-    });
+## Static Audit Commands
 
-    // -------------------------------------------------------------------------
-    // PASS 5: Extension API & Network Indicator Audit
-    // -------------------------------------------------------------------------
-    console.log('\n=== UNMASKED EXTENSION API AUDIT ===');
-    const detectedApis = new Set();
-    const detectedEndpoints = new Set();
-
-    traverse(ast, {
-        MemberExpression(path) {
-            const memberStr = generate(path.node).code;
-            if (memberStr.startsWith('chrome.') || memberStr.startsWith('browser.')) {
-                detectedApis.add(memberStr);
-            }
-        },
-        StringLiteral(path) {
-            const val = path.node.value;
-            if (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('ws://') || val.startsWith('wss://')) {
-                detectedEndpoints.add(val);
-            }
-        }
-    });
-
-    console.log('Detected Extension APIs:');
-    if (detectedApis.size === 0) console.log('  (None detected)');
-    for (const api of detectedApis) {
-        console.log(`  [!] API: ${api}`);
-    }
-
-    console.log('\nDetected Remote Endpoints:');
-    if (detectedEndpoints.size === 0) console.log('  (None detected)');
-    for (const ep of detectedEndpoints) {
-        console.log(`  [!] Endpoint: ${ep}`);
-    }
-
-    const cleanCode = generate(ast, { retainLines: false, compact: false }).code;
-    return cleanCode;
-}
-
-// CLI Execution Entry Point
-if (require.main === module) {
-    const args = process.argv.slice(2);
-    if (args.length === 0) {
-        console.log('Usage: node audit_extension_ast.js <script.js> [output.clean.js]');
-        process.exit(1);
-    }
-    const inputPath = args[0];
-    const outputPath = args[1] || 'deobfuscated_extension.js';
-
-    const source = fs.readFileSync(inputPath, 'utf-8');
-    const cleaned = deobfuscateExtensionScript(source);
-    fs.writeFileSync(outputPath, cleaned, 'utf-8');
-    console.log(`\n[+] Clean deobfuscated script saved to: ${outputPath}`);
-}
-
-module.exports = { deobfuscateExtensionScript };
+```bash
+DIR=./ext_src
+jq '{mv: .manifest_version, bg: .background, perms: .permissions, opt: .optional_permissions,
+     hosts: (.host_permissions // []), cs: [.content_scripts[]? | {matches, js, world, all_frames, run_at}],
+     ext: .externally_connectable, war: .web_accessible_resources, csp: .content_security_policy,
+     dnr: .declarative_net_request, upd: .update_url, sandbox: .sandbox}' "$DIR/manifest.json"
+# Privileged sinks and message handlers.
+rg -n --no-heading -e 'chrome\.(cookies|scripting|debugger|management|proxy|declarativeNetRequest|webRequest|identity)' \
+   -e 'onMessage(External)?\.addListener' -e 'connectNative|sendNativeMessage' \
+   -e 'addEventListener\(\s*["'"'"']message' -e 'updateDynamicRules|executeScript' "$DIR"
+# Remote endpoints after deobfuscation.
+rg -o --no-filename -e 'https?://[^"'"'"' )]+' -e 'wss?://[^"'"'"' )]+' "$DIR" | sort | uniq -c | sort -rn | head -50
 ```
 
----
+Obfuscated code hides `chrome.cookies.getAll` as `chrome[_0x1a(0x10)][_0x1a(0x11)]`. A grep over raw obfuscated files misses it. Deobfuscate first ([browser-js-wasm.md](browser-js-wasm.md), `webcrack` then the Babel script), then grep.
 
-### Playwright CDP Script: Tracing JSVMP in Extension Service Worker
+Compare versions. A clean extension that turns malicious after an ownership change differs in a few files. Diff two unpacked versions (`diff -r`, or `git diff --no-index`) before reading the whole tree.
+
+## Malicious Shapes
+
+| Shape | Static evidence |
+| :--- | :--- |
+| Session/cookie theft | `cookies.getAll({})` or `{domain}` loops, results batched into `fetch(..., {method:'POST'})` or `navigator.sendBeacon` |
+| Search/affiliate hijack | `chrome_settings_overrides.search_provider`, DNR `redirect` rules with `regexSubstitution`, `tabs.onUpdated` rewriting URLs |
+| Injected ads / scripts | Content scripts on `<all_urls>` that create `<script>`/`<iframe>` from server data; `executeScript` with `world: "MAIN"` |
+| Credential capture | Content script listeners on `input[type=password]`, `form` submit, `keydown`; data relayed to the worker |
+| Crypto-wallet / clipboard swap | Address regexes (`^0x[a-fA-F0-9]{40}$`, `bc1`), `offscreen` + clipboard, `document.execCommand('copy')` |
+| Security-header stripping | DNR `modifyHeaders` removing `content-security-policy`, `x-frame-options` |
+| Server-driven behavior | Config fetched at startup or on `chrome.alarms`, stored in `chrome.storage`, then interpreted (rule lists, selectors, URLs, VM bytecode) |
+| Sleeper | Install-time check (`runtime.onInstalled` stores a date) and a delay before enabling the above |
+| Anti-analysis | Disables itself when `chrome://extensions` or DevTools is open (`tabs.query` for those URLs), checks `management.getSelf().installType === 'development'` |
+
+## Evidence To Record
+- CRX/XPI SHA-256, extension ID and how it was derived, version, and the store or path it came from.
+- The manifest summary: permissions, host permissions, content-script matches and worlds, external connectivity, web-accessible resources, CSP, update URL.
+- The message map: each `onMessage`/`onMessageExternal`/`postMessage` handler, the actions it accepts, the sender checks it performs, and the privileged API it reaches.
+- Every remote endpoint with the file and line that builds it, after deobfuscation.
+- For dynamic claims: browser build, profile, and which hook produced the observation.
+
+## Dynamic (When Execution Is Allowed)
+Use a throwaway profile in the lab. Branded Chrome 137+ ignores `--load-extension`. Use Chromium, Chrome for Testing, Playwright's bundled Chromium, or "Load unpacked" on `chrome://extensions`.
+
+- **DevTools.** `chrome://extensions` > Developer mode > the extension's "service worker" link opens the worker's DevTools. `chrome://serviceworker-internals` shows worker state. Content scripts appear in a page's Sources panel under "Content scripts" and in the console context dropdown.
+- **CDP.** The worker is a target of type `service_worker` with URL `chrome-extension://<id>/...`. The script-capture technique in [browser-js-wasm.md](browser-js-wasm.md) works against that target.
+- **The worker restarts.** Hooks installed by `evaluate` vanish after the 30 s idle stop. Re-install on each `serviceworker` event, or keep the worker alive with an open port during tracing.
+- **jshook MCP.** Worker selection, content-script hooks, and request initiator tracing: [jshook-mcp.md](../04-tool-usage/jshook-mcp.md).
+
 ```javascript
-/**
- * trace_extension_service_worker.js
- * Injects hooks into a browser extension background service worker to capture JSVMP execution.
- * 
- * Dependencies:
- *   npm install playwright
- */
-
+// sw_trace.js: npm i playwright ; npx playwright install chromium ; node sw_trace.js ./ext_src
 const { chromium } = require('playwright');
 const path = require('path');
-const fs = require('fs');
-
 (async () => {
-    const extensionPath = path.resolve('./unpacked_extension');
-    console.log(`[*] Launching Chromium with extension from: ${extensionPath}`);
-
-    const context = await chromium.launchPersistentContext('', {
-        headless: false,
-        args: [
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`
-        ]
+  const ext = path.resolve(process.argv[2]);
+  const ctx = await chromium.launchPersistentContext('', {
+    channel: 'chromium',                 // bundled Chromium; branded Chrome ignores --load-extension
+    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
+  });
+  const hook = async (sw) => {
+    console.log('[sw]', sw.url());
+    await sw.evaluate(() => {
+      const f = self.fetch;
+      self.fetch = function (...a) { console.log('[fetch]', String(a[0]), a[1]?.method || 'GET'); return f.apply(this, a); };
     });
-
-    // Wait for the background service worker to register
-    console.log('[*] Waiting for background service worker to initialize...');
-    let serviceWorker = context.serviceWorkers()[0];
-    if (!serviceWorker) {
-        serviceWorker = await context.waitForEvent('serviceworker');
-    }
-    console.log(`[+] Found Service Worker at: ${serviceWorker.url()}`);
-
-    // Evaluate hook inside the service worker context
-    await serviceWorker.evaluate(() => {
-        self.__vmp_trace__ = [];
-        console.log('[+] Hook installed in extension Service Worker.');
-
-        // Hook dispatcher when VM object is instantiated
-        const originalFetch = self.fetch;
-        self.fetch = function(...args) {
-            console.log('[!] Intercepted fetch call inside worker:', args[0]);
-            return originalFetch.apply(this, args);
-        };
-    });
-
-    // Let the extension run for 10 seconds to collect activity
-    await new Promise(r => setTimeout(r, 10000));
-
-    await context.close();
-    console.log('[+] Instrumentation complete.');
+  };
+  ctx.serviceWorkers().forEach(hook);
+  ctx.on('serviceworker', hook);         // fires again after each worker restart
+  ctx.on('console', (m) => console.log('[console]', m.text()));   // includes worker console
+  const page = await ctx.newPage();
+  await page.goto(process.argv[3] || 'https://example.com');
+  await page.waitForTimeout(15000);
+  await ctx.close();
 })();
 ```
 
----
+Verified with Playwright 1.64.1 and its bundled Chromium 156 on a test MV3 extension: the hook fired and the worker's `[fetch]` line arrived through `ctx.on('console')`. A request also shows in the proxy log; see [network-traffic-proxy.md](../02-dynamic-instrumentation/network-traffic-proxy.md).
 
-## 6. Boundaries & Anti-Patterns
-- **Do not assume Content Scripts have access to all `chrome.*` APIs**: Content scripts only have access to a small subset of APIs (e.g., `chrome.runtime.sendMessage`, `chrome.storage`). They cannot directly call `chrome.cookies`, `chrome.tabs`, or `chrome.debugger`. Always look for the message relay to the background worker.
-- **Do not overlook DOM-based communication**: A web page cannot read extension variables, but it can mutate the DOM, set custom `data-*` attributes, or trigger click events on elements monitored by the content script.
-- **Do not ignore service worker lifecycle timeouts**: In MV3, background service workers terminate after 30 seconds of inactivity. Any long-running state machine or socket connection must use alarms (`chrome.alarms`) or native messaging to stay active.
-- **Do not treat `.crx` as a raw ZIP archive without carving**: Directly feeding a `.crx` file into utilities expecting plain ZIP files may fail if the tool does not automatically skip the CRX3 protobuf header. Always strip the header down to `PK\x03\x04` before passing to strict zip libraries.
-- **Do not execute untrusted extension scripts directly in the host environment**: Always sandbox string array rotation routines inside `vm.createContext({})` with explicit timeouts. Obfuscated extensions frequently check for Node.js environment variables to detect analysis sandboxes.
+## Pitfalls
+- A content script cannot call `chrome.cookies` or `chrome.tabs`. Find the message relay to the worker; that relay is the boundary.
+- `sender.url` and `sender.origin` are set by the browser and trustworthy. Fields inside `message` are not.
+- `externally_connectable` absent does not mean "no external callers". Other extensions can still message it.
+- A matching `crx_id` proves who signed, not what the code does. Web Store review does not cover server-driven DNR rules or server data.
+- `chrome.storage.local` content is LevelDB on disk. Read it with a LevelDB tool from a copy of the directory, not from the live profile.
+- MV3 static rulesets are JSON files listed in `declarative_net_request.rule_resources`. Dynamic rules exist only at runtime (`DNR Extension Rules/` on disk).
+- Do not run obfuscated extension code in host Node. Use the lab VM; `vm.createContext` is not a sandbox.

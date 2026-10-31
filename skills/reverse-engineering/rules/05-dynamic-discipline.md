@@ -25,5 +25,5 @@ All Frida instrumentation scripts must follow strict batch lifecycle contracts:
 ## Anti-Debugging & Evasion Handling
 Prolonged interactive step-debugging through anti-debug routines or virtualization stubs is prohibited. Prefer deterministic, lightweight countermeasures:
 1. **Direct Memory Patching**: Patch known environment flags or API return values in memory (e.g. `PEB.BeingDebugged`, `ptrace` return values).
-2. **Hardware Breakpoints**: Use non-invasive hardware execution breakpoints over software `0xCC` breakpoints to avoid code-integrity integrity scans.
+2. **Hardware Breakpoints**: Use non-invasive hardware execution breakpoints over software `0xCC` breakpoints to avoid code-integrity scans.
 3. **Memory Dumping from OEP**: Let the sample execute its unpacking stub in VM containment, set a breakpoint on the OEP transition or process injection call (`VirtualAllocEx` / `mprotect`), and dump the fully decrypted payload to disk (`dump_memory.py`) for static analysis.

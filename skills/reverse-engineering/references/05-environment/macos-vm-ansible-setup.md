@@ -1,118 +1,122 @@
-# macOS VM Ansible Automated Provisioning & Tool Setup Guide
+# macOS VM Ansible Provisioning
 
-Automated provisioning for macOS guest virtual machines running on Apple Silicon hosts under UTM (Apple Virtualization framework with IPSW restore).
+Provision a macOS guest on an Apple Silicon host (UTM, Apple Virtualization backend, IPSW install) over SSH with `ansible/playbook_macos.yml` and `ansible/macos_tools.json`. Run commands from the skill directory.
 
-## Architecture & Constraints
+## Constraints
 
-1. **Apple Silicon Virtualization Constraint**:
-   - macOS guest VMs on Apple Silicon (`arm64`) can **ONLY** be created on a macOS host. Apple Virtualization framework (`VZVirtualMachine`) paired with UTM handles initial IPSW installation.
-2. **Initial Setup (Guest VM)**:
-   - Complete initial macOS setup assistant in UTM.
-   - Enable SSH (**Remote Login**):
-     - Go to **System Settings** -> **General** -> **Sharing**.
-     - Toggle on **Remote Login** and allow access for your user account (or run `sudo systemsetup -setremotelogin on` in Terminal).
-   - Verify guest IP address (e.g., via `utmctl ip-address <vm-name>` or Terminal `ifconfig en0`).
-3. **Provisioning Model**:
-   - Homebrew manages CLI formulae and GUI casks unprivileged as the standard user.
-   - System tasks (Packet Filter firewall, `/opt/ida_dbgsrv`) use `sudo` elevation.
+- macOS guests on Apple Silicon run only on a macOS host, through Virtualization.framework. UTM installs them from an IPSW (`UniversalMac_*_Restore.ipsw`).
+- Apple-backend VMs have no QEMU guest agent. `utmctl exec`, `utmctl file`, `utmctl ip-address`, and `setup_utm.py guest-*` do not work. Use SSH.
+- Snapshots of Apple-backend VMs need UTM 5.0.7+ on a macOS 27 host, with the VM stopped.
 
----
+## Guest preparation
 
-## Tool Catalog (`ansible/macos_tools.json`)
-
-The structured JSON catalog covers essential reverse engineering and monitoring tools for macOS:
-- **`telemetry_monitoring`**: `osquery` (installed via cask `osquery`)
-- **`network_analysis`**: `tshark` / `wireshark` (formula `wireshark`)
-- **`debugging_disassembly`**:
-  - `radare2` (formula `radare2`)
-  - `ghidra` (formula `ghidra`; pulls in openjdk)
-  - `jtool2` (formula `jtool2`, Mach-O / dyld shared cache symbol inspection)
-  - `ida_dbgsrv` (IDA Pro mac_server / mac_server_arm on port 23946)
-- **`forensics_triage`**:
-  - `binwalk` (formula `binwalk`)
-  - `yara` (formula `yara`)
-  - `ipsw` (formula `blacktop/tap/ipsw`, Apple firmware & kernelcache parser)
-- **`system_utilities`**: `python@3.12`, `uv`, `git`, `p7zip`, `curl`
-- **`automation_agent`**: `computer-use-mcp` (desktop automation MCP server on port 4517)
-
----
-
-## Provisioning Workflow
-
-### 1. Generate Inventory
-Generate a ready-to-use inventory file using `setup_vm.py`:
+Option A, macOS 27 host and guest (UTM provisioning on first boot):
 
 ```bash
-# Key-based SSH authentication (recommended)
-uv run scripts/setup_vm.py generate-inventory \
-  --os macos \
-  --host 192.168.64.30 \
-  --user analyst \
-  --key-file ~/.ssh/id_ed25519
-
-# Or password-based authentication
-uv run scripts/setup_vm.py generate-inventory \
-  --os macos \
-  --host 192.168.64.30 \
-  --user analyst \
-  --password labpassword \
-  --become-password labpassword
+VM="macOS-RE-Lab"
+printf '%s' "$PASS" | utmctl start "$VM" --provision-username analyst \
+  --provision-password-stdin --provision-auto-login --provision-ssh
 ```
 
-The playbook needs sudo for Command Line Tools, Homebrew, PF, and pkg-based casks. Pass `--become-password` unless the user already has NOPASSWD sudo.
+Option B, by hand in the guest:
+1. Finish Setup Assistant.
+2. Enable Remote Login: **System Settings > General > Sharing > Remote Login**, or `sudo systemsetup -setremotelogin on` (needs Full Disk Access for Terminal on recent macOS).
+3. Turn on automatic login for the user. The Homebrew pkg assigns `/opt/homebrew` to the console user.
 
-This writes `ansible/inventory_macos.ini`.
+Find the guest IP: in the guest `ipconfig getifaddr en0`; on the host `grep -A2 "name=<guest-hostname>" /var/db/dhcpd_leases` (entries carry the guest hostname, not the UTM name; Apple NAT uses `192.168.64.0/24`).
 
-### 2. Verify Connectivity
-Test SSH via Ansible ping:
+Then copy your key: `ssh-copy-id -i ~/.ssh/id_ed25519.pub analyst@"$VM_IP"`.
+
+## Tool catalog (`ansible/macos_tools.json`)
+
+| Catalog id | Homebrew | Checked path |
+|---|---|---|
+| `osquery` | cask `osquery` | `/usr/local/bin/osqueryi` |
+| `tshark` | formula `wireshark` | `/opt/homebrew/bin/tshark` |
+| `radare2` | formula `radare2` | `/opt/homebrew/bin/r2` |
+| `node` | formula `node` (npm for computer-use-mcp) | `/opt/homebrew/bin/npm` |
+| `ghidra` | formula `ghidra` (pulls openjdk; the cask was removed) | `/opt/homebrew/bin/ghidraRun` |
+| `binwalk`, `yara`, `git`, `uv` | formula, same name | `/opt/homebrew/bin/<name>` |
+| `ipsw` | formula `blacktop/tap/ipsw` | `/opt/homebrew/bin/ipsw` |
+| `jtool2` | cask `excitedplus1s/repo/jtool2` | `/opt/homebrew/bin/jtool2` |
+| `python3` | formula `python@3.12` | `/opt/homebrew/opt/python@3.12/bin/python3.12` |
+| `p7zip` | formula `sevenzip` (binary `7zz`) | `/opt/homebrew/bin/7zz` |
+| `curl` | formula `curl` (keg-only) | `/opt/homebrew/opt/curl/bin/curl` |
+| `ida_dbgsrv` | copied from the host IDA install | `/opt/ida_dbgsrv` |
+| `computer-use-mcp` | `npm install -g @zavora-ai/computer-use-mcp` | `/opt/homebrew/bin/computer-use-mcp` |
+
+16 entries, all enabled. `uv run scripts/setup_vm.py list --os macos` prints the live state.
+
+## Workflow
 
 ```bash
-ansible macos_vms -i ansible/inventory_macos.ini -m ping
-```
+VM_IP=192.168.64.30
 
-### 3. Run Provisioning Playbook
-Execute `playbook_macos.yml` via the helper CLI:
+# 1. Inventory -> ansible/inventory_macos.ini
+uv run scripts/setup_vm.py generate-inventory --os macos \
+  --host "$VM_IP" --user analyst --key-file ~/.ssh/id_ed25519 \
+  --become-password "$PASS"
+# password SSH instead of a key: --password "$PASS" (needs sshpass on the controller)
 
-```bash
+# 2. Connectivity. Before CLT exists, /usr/bin/python3 is a stub, so use raw:
+ansible macos_vms -i ansible/inventory_macos.ini -m raw -a 'sw_vers'
+
+# 3. Provision
 uv run scripts/setup_vm.py run-playbook --os macos -v
 ```
 
-The playbook performs:
-0. **Command Line Tools bootstrap**: On a fresh guest `/usr/bin/python3` is only an installer stub, so fact gathering would fail. A first play uses `raw` to install CLT through `softwareupdate`, retrying twice if Apple's server does not answer, then the main play gathers facts.
-1. **Directory Staging**: Prepares `/opt/ida_dbgsrv` owned by the user and copies `mac_server_arm` (or `mac_server`) from the host's IDA `dbgsrv` folder. `DevToolsSecurity -enable` allows debugging without a prompt per attach.
-2. **Packet Filter Firewall**: Deploys `/etc/pf.anchors/com.re.tools` and loads PF rules to allow port `23946` (IDA debug server) and `4517` (Computer Use MCP).
-3. **Homebrew Bootstrap**: Installs Homebrew from the signed `Homebrew.pkg` release (one HTTPS download with retries; the signature is checked), and falls back to `install.sh` only if that fails. On the UTM guest `install.sh` failed five times on `git fetch` with "Connection reset by peer". The pkg assigns `/opt/homebrew` to the console user, so log that user in (UTM provisioning sets automatic login). The installer and pkg casks call sudo without a TTY, so the play adds a temporary NOPASSWD rule in `/etc/sudoers.d/zz-ansible-homebrew` and removes it in an `always` block.
-4. **Formula & Cask Installations**: Installs each formula and cask separately so one failure does not skip the rest. Ghidra is a formula (the cask was removed upstream). Third-party taps (`blacktop/tap`, `excitedplus1s/repo`) are trusted with `brew trust` before use; current Homebrew refuses untrusted taps. `jtool2` is a cask in its tap. `node` provides npm for `@zavora-ai/computer-use-mcp`.
-5. **Telemetry Daemon**: Stages a baseline `osquery.conf` in `/var/osquery/`.
+The inventory sets `ansible_become=false`; tasks that need root use `become: true` one by one. They need `--become-password` unless the user has NOPASSWD sudo.
 
----
+Play order:
+0. Bootstrap play, `gather_facts: false`: if `/Library/Developer/CommandLineTools/usr/bin/python3` is missing, touch `/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress`, pick the newest `Command Line Tools` label from `softwareupdate --list`, `softwareupdate --install` it (2 retries, 30 s apart), `xcode-select --switch /Library/Developer/CommandLineTools`.
+1. Create `/opt/ida_dbgsrv` owned by the user; copy `mac_server_arm` (arm64) or `mac_server` from `ida_dbgsrv_src` (`run-playbook` fills it from `$IDA_DBGSRV`, `$IDADIR`, or `/Applications/IDA*.app`). `DevToolsSecurity -enable`.
+2. PF anchor `/etc/pf.anchors/com.re.tools` passing TCP 23946 and 4517, referenced from `/etc/pf.conf`, loaded with `pfctl -a com.re.tools -f`. PF is not enabled (`pfctl -e`) by the play; macOS ships with PF off, so this only matters if you enable it.
+3. Temporary `/etc/sudoers.d/zz-ansible-homebrew` NOPASSWD rule (removed in an `always` block). The Homebrew installer and pkg casks call sudo without a TTY.
+4. Homebrew from the signed `Homebrew.pkg` release (curl with retries, `pkgutil --check-signature`), falling back to `install.sh` (2 retries). `eval "$(/opt/homebrew/bin/brew shellenv)"` goes into `~/.zprofile`.
+5. Tap third-party repos (`blacktop/tap`, `excitedplus1s/repo`) and `brew trust` each one.
+6. Install each formula and cask on its own, so one failure does not skip the rest. Then `npm install -g @zavora-ai/computer-use-mcp`.
+7. Stage `/var/osquery/osquery.conf` if absent. The play does not load the `io.osquery.osqueryd` daemon.
+8. `stat` every catalog `binary_path`, print `found` and `missing`.
 
-## IDA Remote Debugging Configuration
+## Troubleshooting
 
-1. Locate `mac_server` or `mac_server_arm` in your host IDA Pro installation (`$IDADIR/dbgsrv` or `/Applications/IDA*.app/Contents/MacOS/dbgsrv/`):
-   - For Apple Silicon macOS guests: `mac_server_arm`
-   - For Intel macOS guests: `mac_server`
-2. Push to VM:
-   ```bash
-   scp "$IDADIR/dbgsrv/mac_server_arm" analyst@192.168.64.30:/opt/ida_dbgsrv/
-   ssh analyst@192.168.64.30 "chmod +x /opt/ida_dbgsrv/mac_server_arm"
-   ```
-3. Run on guest VM:
-   ```bash
-   /opt/ida_dbgsrv/mac_server_arm -p23946
-   ```
-4. In IDA Pro on the host:
-   - Select **Debugger** -> **Select debugger** -> **Remote Mac OS X debugger**.
-   - Set **Hostname** to guest IP (`192.168.64.30`) and **Port** to `23946`.
+| Symptom | Cause | Fix |
+|---|---|---|
+| Fact gathering fails: `xcrun: error: invalid active developer path` or python3 install prompt | No Command Line Tools; `/usr/bin/python3` is a stub | The bootstrap play installs CLT. If it fails, run in the guest: `touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress; softwareupdate --list` and install the listed label |
+| `no Command Line Tools label in softwareupdate --list` | Apple catalog unreachable or no CLT for this beta OS | Check guest internet; retry; for beta guests install CLT `.dmg` from developer.apple.com |
+| `Missing sudo password` / `sudo: a password is required` | No `--become-password` | Regenerate the inventory with `--become-password` |
+| `install.sh` fails with `Connection reset by peer` on `git fetch` | Flaky git over the VM NAT | The play uses the signed pkg first; rerun |
+| `/opt/homebrew` owned by root or another user | Homebrew pkg installed while nobody was logged in at the console | Enable automatic login, log in, `sudo chown -R analyst:admin /opt/homebrew`, rerun |
+| `Error: Refusing to load ... from untrusted tap` | Homebrew 7 requires trusted third-party taps | `brew trust blacktop/tap` and `brew trust excitedplus1s/repo` (the play does this) |
+| `jtool2` missing after the run | It is a cask in `excitedplus1s/repo`, not a formula | `brew install --cask excitedplus1s/repo/jtool2` |
+| osquery cask hangs or fails | pkg cask needs sudo without TTY | The temporary sudoers rule covers it; rerun with `--become-password` |
+| `osqueryi` works, `osqueryd` not running | Play only stages the config | `sudo osqueryctl start` (or load `/Library/LaunchDaemons/io.osquery.agent.plist`) |
+| `mac_server_arm` cannot attach to a process | SIP protects hardened/platform binaries; debugger not authorized | Run the server with sudo; `DevToolsSecurity -enable`; for system targets disable SIP in guest Recovery |
+| Host cannot reach 23946/4517 | macOS Application Firewall in the guest | `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /opt/ida_dbgsrv/mac_server_arm` and `--unblockapp` it |
+| `utmctl ip-address` fails | Apple backend has no guest agent | Use `/var/db/dhcpd_leases` or `ipconfig getifaddr en0` in the guest |
 
----
-
-## Computer Use MCP Integration
-
-Generate host MCP client configuration:
+## IDA remote debugging
 
 ```bash
-uv run scripts/setup_vm.py mcp-client-config --os macos --host 192.168.64.30
+ssh analyst@"$VM_IP" 'sudo /opt/ida_dbgsrv/mac_server_arm -p23946'
 ```
 
-Add the resulting JSON to your host agent's MCP configuration (`~/.omp/agent/mcp.json` or project MCP settings) to automate the guest macOS desktop session.
+To copy by hand:
+
+```bash
+DBGSRV="$(ls -d /Applications/IDA*.app/Contents/MacOS/dbgsrv | tail -n1)"
+scp "$DBGSRV/mac_server_arm" analyst@"$VM_IP":/opt/ida_dbgsrv/
+ssh analyst@"$VM_IP" chmod +x /opt/ida_dbgsrv/mac_server_arm
+```
+
+`mac_server_arme` is the arm64e build. In IDA: **Debugger > Select debugger... > Remote ARM Mac OS debugger** (`mac_server` on Intel: **Remote Mac OS X debugger**); **Process options**: Hostname `$VM_IP`, Port `23946`. More: [ida-remote-debugging.md](ida-remote-debugging.md).
+
+## Computer Use MCP
+
+The play installs `@zavora-ai/computer-use-mcp` but starts nothing. Start it in the guest's logged-in GUI session and grant it Screen Recording and Accessibility in System Settings > Privacy & Security. Then:
+
+```bash
+uv run scripts/setup_vm.py mcp-client-config --os macos --host "$VM_IP"
+```
+
+Give the JSON to the parent. Do not rewrite `mcp.json` yourself.

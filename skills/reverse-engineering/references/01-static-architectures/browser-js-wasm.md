@@ -1,856 +1,463 @@
-# Browser JavaScript & WebAssembly Reverse Engineering
+# Browser JavaScript, Electron & WebAssembly Reverse Engineering
 
-## 1. Title & Overview
-- **Domain**: Client-side web applications, Electron desktop frameworks, Node.js packages, browser extensions, and WebAssembly (WASM) modules.
-- **Scope**: Reversing bundled and minified JavaScript (Webpack, Vite, Rollup, Turbopack), unpacking Electron ASAR archives, professional Abstract Syntax Tree (AST) deobfuscation pipelines using Babel (string array un-packing, rotation decoding, proxy function inlining, constant folding, dead-code pruning, property accessor normalization, control-flow unflattening), JavaScript Virtual Machine Protection (JSVMP) devirtualization (bytecode extraction, interpreter reversing, dynamic CDP tracing, AST synthesis), and analyzing WebAssembly binaries (`.wasm`) using WABT, Ghidra, and linear memory reconstruction.
+## When To Open
+Open this file for a web bundle (`*.js`, `chunk-*.js`, `*.map`), an Electron app (`app.asar`), a Node `.jsc` (bytenode), or a `.wasm` module (`00 61 73 6D`). Browser extensions (`Cr24`, `.xpi`, `manifest.json`) are [browser-extensions.md](browser-extensions.md). React Native Hermes bytecode is [react-native-hermes.md](react-native-hermes.md). Live CDP hooking with the jshook MCP server is [jshook-mcp.md](../04-tool-usage/jshook-mcp.md); this file links to it and does not repeat its tool list.
 
----
+## Order Of Work
+Static first. A bundle is read before any page is loaded.
 
-## 2. Trigger Conditions & Detection Indicators
-Engage this reference when analyzing client-side JavaScript, obfuscated web scripts, or WebAssembly targets:
+1. **Identify the container.** `file`, the first 64 bytes, and the last line (`//# sourceMappingURL=`). Use the fingerprint table below.
+2. **Look for a source map before deobfuscating.** A map with `sourcesContent` is the original source. It ends the job for that file.
+3. **Unpack the bundle into modules.** One module per file. Grep module files, not a 3 MB single line.
+4. **Deobfuscate only the modules that matter.** Run `webcrack` first. Write a Babel pass only for what webcrack leaves.
+5. **Name the boundary.** `fetch`/`XMLHttpRequest`/`WebSocket` callers, `crypto.subtle`, `WebAssembly.instantiate`, and `postMessage`. That is where request signing and key material live.
+6. **Go dynamic only when static stalls.** Runtime-decrypted code, JSVMP, or a value computed from the environment. See "Dynamic" below.
 
-### Binary & Artifact Signatures
-- **JavaScript Bundles & Minified Code**:
-  - Files named `*.bundle.js`, `chunk-*.js`, `app.*.js`, `vendor.*.js`.
-  - Minified single-line files, short identifier mangling (`a`, `b`, `c`), Webpack bootstrap headers: `webpackJsonp`, `__webpack_require__`, `self["webpackChunk..."]`.
-  - Vite / Rollup runtime headers: `import.meta.glob`, `__vite_ssr_import__`.
-- **Obfuscator.io / JavaScript-Obfuscator Signatures**:
-  - Global string array declaration with hex identifiers: `var _0x5a1b = ['string1', 'string2', ...];`.
-  - Self-invoking shift/rotation routine containing a `while (--_0xcount)` or `parseInt` arithmetic validation loop:
-    ```javascript
-    (function(_0xarr, _0xnum) {
-        var _0xshift = function(_0xcount) {
-            while (--_0xcount) { _0xarr['push'](_0xarr['shift']()); }
-        };
-        _0xshift(++_0xnum);
-    })(_0x5a1b, 0x1f4);
-    ```
-  - Decryption helper function retrieving items by index offset: `function _0x4f2a(_0xidx) { return _0x5a1b[_0xidx - 0x0]; }`.
-  - Bracket notation accessors across standard APIs: `window['document']['location']['href']`, `console['log']`.
-  - Proxy wrapper functions returning binary operations: `function _0x1a2b(a, b) { return a + b; }`.
-  - Control-flow flattening (CFF): `while (true) switch (_0xorder[_0xidx++]) { ... }`.
-- **JSVMP (JavaScript Virtual Machine Protection) Signatures**:
-  - Compact custom bytecode stream stored as a long base64 string, hex array, or binary typed array (`Uint8Array`).
-  - Virtual program counter (`vpc`), virtual stack pointer (`vsp`), and execution stack array (`stack = []`).
-  - Central virtual opcode dispatch loop executing a `while (vpc < bytecode.length)` with a giant `switch (opcode)` or jump table:
-    ```javascript
-    while (true) {
-        switch (bytecode[vpc++]) {
-            case 0x01: stack.push(bytecode[vpc++]); break; // PUSH_CONST
-            case 0x02: stack.push(stack.pop() + stack.pop()); break; // ADD
-            case 0x03: env[bytecode[vpc++]] = stack.pop(); break; // STORE_VAR
-            case 0x04: stack.push(env[bytecode[vpc++]]); break; // LOAD_VAR
-            case 0x05: var fn = stack.pop(); fn.apply(null, stack.pop()); break; // CALL
-            case 0x00: return stack.pop(); // RET
-        }
-    }
-    ```
-- **Electron Application Archives**:
-  - File: `app.asar` located in `<App>/resources/app.asar` or `<App>.app/Contents/Resources/app.asar`.
-  - Header: 4-byte size followed by JSON header describing virtual file system directory tree.
-- **WebAssembly Binaries**:
-  - File extension: `.wasm`.
-  - Magic bytes (first 4 bytes): `\x00asm` (`0x6D736100` in little-endian, bytes `00 61 73 6D`).
-  - Version: `0x00000001` (`01 00 00 00`).
+## Fingerprints
 
----
+| Evidence | Meaning |
+| :--- | :--- |
+| `(self.webpackChunk<name>=self.webpackChunk<name>\|\|[]).push([[id],{...}])` | Webpack 5 chunk. Modules are keyed by numeric or path ID. Webpack 5.1xx emits method shorthand: `{899(e,t,n){...}}`. |
+| `n.d(t,{run:()=>e})`, `n.r(t)`, `n.e(899)`, `n.u=t=>t+".js"` | Minified `__webpack_require__` helpers: `.d` define exports, `.r` mark ESM, `.e` load chunk, `.u` chunk URL. |
+| `webpackJsonp`, modules as `[function(e,t,n){...}]` array | Webpack 4 or older. |
+| `__commonJS`, `__toESM`, `__export`, `__esm(()=>{...})` helpers, `chunk-<HASH>.js` | esbuild (also Vite dev and Vite's dependency pre-bundle). |
+| Plain ESM, hoisted top-level declarations, `/*#__PURE__*/`, `assets/index-<hash>.js`, `__vite__mapDeps`, `modulepreload` polyfill | Rollup / Vite production. No runtime module map; scope hoisting merged modules. |
+| `parcelRequire`, `parcelRegister`, `$parcel$export` | Parcel. |
+| `(globalThis.TURBOPACK = globalThis.TURBOPACK \|\| []).push(...)` | Turbopack (Next.js). |
+| `/_next/static/chunks/`, `_buildManifest.js`, `self.__next_f.push` | Next.js. `_buildManifest.js` lists routes; `__next_f` is a React Server Components payload. |
+| `require=function r(e,n,t){...}` prelude, `[function(require,module,exports){...},{"./x":3}]` | Browserify. |
+| `function _0x5c19(...)`, a self-reassigning `function _0x15fa(){const a=[...];_0x15fa=function(){return a};...}`, `while(!![]){try{...parseInt(...)...}catch{...push(...shift())}}` | obfuscator.io (`javascript-obfuscator`). See the obfuscator.io section. |
+| One giant `switch` over a numeric array or decoded byte string, an operand stack array, a program counter | JSVMP (custom JS VM). |
+| `app.asar`, `app.asar.unpacked/`, `Electron Framework.framework` | Electron. |
+| `.jsc` next to a stub `require('bytenode')` | V8 code cache (bytenode). |
+| `00 61 73 6D 01 00 00 00` | WebAssembly binary, version 1. |
 
-## 3. Tooling & CLI/MCP Actions
+Production webpack 5 builds with `concatenateModules` (default in `mode: production`) merge most modules. An unpacker then reports one entry module. That is not a failure.
 
-### AST Deobfuscation Ecosystem
-- **Babel Toolchain**:
-  - `@babel/parser`: Parses JavaScript source code into ESTree / Babel AST.
-  - `@babel/traverse`: Traverses and modifies AST nodes, manages scope bindings and path replacements.
-  - `@babel/generator`: Serializes transformed AST back into formatted JavaScript.
-  - `@babel/types`: Utility functions for building, validating, and testing AST node types.
-  ```bash
-  npm install --save-dev @babel/parser @babel/traverse @babel/generator @babel/types
-  ```
-- **Specialized Automated Deobfuscators**:
-  - `webcrack`: Deobfuscates Obfuscator.io, unbundles Webpack chunks into original directory structures, un-proxies function calls.
-    ```bash
-    npx webcrack bundle.js -o ./deobfuscated_src
-    ```
-  - `wakaru`: Modern unbundler and decompiler; recovers TypeScript modules, inlines helper functions, un-minifies mangled variables.
-    ```bash
-    npx @wakaru/cli unminify target.min.js -o ./output
-    ```
-  - `synchrony`: AST deobfuscator specifically tuned for Obfuscator.io variants, unflattening control flow and decoding encrypted strings.
-    ```bash
-    npx synchrony deobfuscate obfuscated.js
-    ```
-  - `deobfuscator.io`: Web-based and CLI AST cleaner for common commercial obfuscation patterns.
+## Source Maps
+Look in three places. The trailing `//# sourceMappingURL=<url>` comment. A `SourceMap:` or `X-SourceMap:` HTTP response header. `<bundle>.js.map` next to the bundle even when the comment was stripped. Inline maps start with `data:application/json;base64,`.
 
-### Dynamic Tracing & JSVMP Instrumentation
-- **JSHook MCP (`@jshookmcp/jshook`)**: Primary automated dynamic RE suite for CDP debugging, runtime hooking, JSVMP opcode tracing, and AST devirtualization. Exposes 600+ tools under token-efficient discovery (`MCP_TOOL_PROFILE=search`). Detailed tool usage, 5-phase workflows, and boundaries are documented in [04-tool-usage/jshook-mcp.md](../04-tool-usage/jshook-mcp.md).
-- **Chrome DevTools Protocol (CDP)**: Intercepts service workers, evaluates runtime expressions, sets breakpoints on opcode dispatchers.
-- **Playwright / Puppeteer**: Automated browser environment to load obfuscated targets, hook global functions, and stream instruction traces.
-- **Dynamic Hooking**:
-  ```bash
-  # Run target in headless browser with remote debugging enabled
-  google-chrome --headless=new --remote-debugging-port=9222 target.html
-  ```
-### Binary Extraction & WebAssembly Tools
-- **Electron ASAR Unpacker**:
-  ```bash
-  npx asar extract app.asar ./unpacked_app
-  npx asar list app.asar
-  ```
-- **Source Map Recovery**:
-  ```bash
-  npx restore-source-tree -o ./restored_src target.bundle.js.map
-  ```
-- **WebAssembly Tools (WABT Suite)**:
-  - `wasm2wat`: Translates binary `.wasm` into WebAssembly Text format (`.wat`).
-    ```bash
-    wasm2wat module.wasm -o module.wat
-    ```
-  - `wasm-decompile`: Produces high-level C-like pseudocode from WASM bytecode.
-    ```bash
-    wasm-decompile module.wasm -o module.dcmp
-    ```
-  - `wasm-objdump`: Inspects sections, imports, exports, and linear memory segments.
-    ```bash
-    wasm-objdump -x module.wasm
-    ```
-
----
-
-## 4. Core Methodologies & Step-by-Step Technical Workflow
-
-### 4.1 Bundle De-Minification & Module Isolation (Webpack, Vite, Rollup)
-Modern frontend applications pack hundreds of modules into single minified files.
-
-#### Webpack Module Layout:
-```javascript
-(self["webpackChunkapp"] = self["webpackChunkapp"] || []).push([["main"], {
-    1042: (module, exports, __webpack_require__) => {
-        const api = __webpack_require__(502);
-        exports.login = function(user, pass) { ... };
-    },
-    502: (module, exports) => {
-        exports.endpoint = "https://api.target.com/v1";
-    }
-}]);
+```bash
+# Extract every file in sourcesContent. Verified with @wakaru/cli 1.15.0.
+npx -y @wakaru/cli@1.15.0 extract "$MAP" -o ./from_map
+# Alternative: shuji writes the same files, flattened per map.
+npx -y shuji "$MAP" -o ./from_map_shuji
 ```
 
-#### Reversing Workflow:
-1. **Source Map Check**: Look at the final line of `.js` files for `//# sourceMappingURL=...`. If an inline base64 source map or external `.map` file exists, decode it using `restore-source-tree` to immediately recover original TypeScript/JavaScript source files, folder hierarchies, and variable names.
-2. **Automated Unbundling**: Run `webcrack bundle.js -o ./src`. This identifies module boundaries and writes each module to a separate file matching its imported name or numeric ID.
+- A map without `sourcesContent` still gives original file paths and identifier `names`. Pass it to wakaru for renaming: `npx -y @wakaru/cli@1.15.0 "$BUNDLE" -m "$MAP" -o out.js`.
+- `restore-source-tree@0.1.1` processed zero files on a webpack 5 map in testing. Do not use it.
+- Paths like `webpack://<name>/src/...` give the project name and the original tree. Paths under `node_modules/` give exact dependency versions.
 
----
+## Unpack And Unminify
 
-### 4.2 Professional JavaScript AST Deobfuscation Pipeline
-Commercial obfuscators (such as JavaScript-Obfuscator / Obfuscator.io) generate multi-layered defenses. Manual renaming is impossible at scale; reversing requires multi-pass AST transformations via `@babel/parser`, `@babel/traverse`, and `@babel/generator`.
+```bash
+# webcrack 2.16.0: deobfuscate + unminify + unpack (webpack/browserify). Writes deobfuscated.js,
+# and bundle.json plus one file per module when a module map exists.
+# Requires Node 22 or 24 (isolated-vm does not build on Node 26). `npx -y node@24 ...` is a workaround.
+npx -y webcrack@2.16.0 "$BUNDLE" -o ./wc_out -f
 
-```text
-┌────────────────────────────────────────────────────────┐
-│               Raw Obfuscated JavaScript                │
-└───────────────────────────┬────────────────────────────┘
-                            │ @babel/parser
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                      Babel AST                         │
-└───────────────────────────┬────────────────────────────┘
-                            │ Pass 1
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│      String Array Unpacking & Rotation Decoding        │
-│  - Extract Array + Shift IIFE + Decryptor Routine      │
-│  - Run shift in isolated Node.js vm.createContext      │
-│  - Replace _0x4f2a(0x1a) call sites with StringLiteral │
-│  - Remove array, shift, and decryptor AST nodes        │
-└───────────────────────────┬────────────────────────────┘
-                            │ Pass 2
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│               Proxy Function Inlining                  │
-│  - Identify single-operator / single-call wrappers     │
-│  - Inline expressions at CallExpression sites          │
-│  - Remove proxy function declarations                  │
-└───────────────────────────┬────────────────────────────┘
-                            │ Pass 3
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│         Dead-Code Pruning & Constant Folding           │
-│  - path.evaluate() on Binary/Unary expressions         │
-│  - Prune dead IfStatement branches (if (false) ...)    │
-│  - Prune dead ternary ConditionalExpressions           │
-└───────────────────────────┬────────────────────────────┘
-                            │ Pass 4
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│            Property Accessor Normalization             │
-│  - window['document']['location'] -> window.document   │
-│  - Verify property string is a valid JS identifier     │
-└───────────────────────────┬────────────────────────────┘
-                            │ Pass 5
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│            Control-Flow Unflattening (CFF)             │
-│  - Parse while (true) switch (state) dispatchers       │
-│  - Extract execution order array ('3|1|0|2'.split('|'))│
-│  - Reorder basic blocks into linear sequential code    │
-└───────────────────────────┬────────────────────────────┘
-                            │ @babel/generator
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│              Clean Deobfuscated JavaScript             │
-└────────────────────────────────────────────────────────┘
+# wakaru 1.15.0 (Rust rewrite, binary `wakaru`): unminify, or split a bundle into modules.
+npx -y @wakaru/cli@1.15.0 "$BUNDLE" -o out.js
+npx -y @wakaru/cli@1.15.0 "$BUNDLE" --unpack -o ./wk_out          # webpack, browserify, esbuild, scope-hoisted
+npx -y @wakaru/cli@1.15.0 "$BUNDLE" --unpack --provenance -o ./wk_out   # provenance.json maps modules to byte ranges
 ```
 
-#### Step-by-Step AST Engineering Details:
+Decision table, measured on `javascript-obfuscator` 5.9.0 output (string array + rc4 + wrappers + calls transform + dead code):
 
-1. **String Array Un-packing & Rotation Decoding**:
-   - **Structure**: Obfuscator.io splits string storage into three top-level AST nodes:
-     1. `VariableDeclaration`: Global array containing strings (often encoded or scrambled).
-     2. `ExpressionStatement`: An IIFE that shifts array elements (`push(shift())`) in a loop until a numeric checksum matches.
-     3. `FunctionDeclaration` / `VariableDeclaration`: The accessor/decryptor function taking an index argument, adjusting for offset, and returning the string.
-   - **Static Extraction**: Extract the code of these three nodes from the AST. Execute them inside a secure Node.js `vm.createContext({})` sandbox to compute the post-rotation state of the helper function.
-   - **Call Site Inlining**: Traverse the AST for `CallExpression` nodes where `path.node.callee` matches the helper function name. Extract numeric literal arguments, invoke the sandbox helper function, and replace the `CallExpression` with `t.stringLiteral(result)`.
-   - **Pruning**: Delete the initial three AST nodes from `ast.program.body`.
+| Tool | Result | Use for |
+| :--- | :--- | :--- |
+| `webcrack@2.16.0` | Clean, runnable output. Also removed self-defending and debug-protection. | First pass for obfuscator.io and webpack/browserify. |
+| `@wakaru/cli@1.15.0` | Unminify and unpack. Not an obfuscator.io string-array decoder. | Renaming, ES syntax recovery, Vue/JSX recovery, source-map-guided names. |
+| `restringer@2.3.0` | Correct on the basic preset. Produced a broken call on the hard preset. 34 s. | Second opinion on generic string-building obfuscation. |
+| `synchrony` (npm `deobfuscator@2.4.6`, `npx -y -p deobfuscator@2.4.6 synchrony deobfuscate in.js -o out.js`) | Broken output on both presets. | Old (pre-2023) obfuscator.io output only. |
+| Babel script below | Clean, runnable output on all non-self-defending presets. | Variants that webcrack misses; adapt it. |
 
-2. **Proxy Function Inlining**:
-   - Obfuscators wrap simple operations in proxy functions to defeat signature scanners:
-     ```javascript
-     function _0x1a2b(a, b) { return a + b; }
-     function _0x3c4d(a, b) { return a === b; }
-     function _0x5e6f(fn, a, b) { return fn(a, b); }
-     ```
-   - **Detection**: In `FunctionDeclaration`, inspect `body.body`. If length is 1 and statement is a `ReturnStatement` wrapping a `BinaryExpression` or `CallExpression` referencing the function's own parameters, register the proxy.
-   - **Replacement**: Find all call sites referencing the proxy identifier. Replace `_0x1a2b(x, y)` directly with `t.binaryExpression('+', x, y)`. Remove the proxy function declaration.
+Always run the result (in the lab) or diff behavior. A deobfuscator that silently drops a call is worse than none.
 
-3. **Dead-Code Pruning & Constant Folding**:
-   - Constant expressions: Use Babel's built-in `path.evaluate()`. If `path.evaluate().confident === true`, replace the node with `t.valueToNode(result)`. This converts `"a" + "b"` into `"ab"` and `0x10 ^ 0x15` into `5`.
-   - Dead branches: In `IfStatement`, evaluate `path.get('test')`. If confident and truthy, replace the `IfStatement` with its `consequent`. If confident and falsy, replace with `alternate` (or remove if no alternate exists).
+## obfuscator.io Anatomy
+Current `javascript-obfuscator` (4.x/5.x) output has these parts. Older posts describing `var _0x5a1b=[...]` as the first statement and `while(--n)` rotation are pre-2021 layouts.
 
-4. **Property Accessor Normalization**:
-   - Obfuscated code converts clean property access into computed string access: `window['document']['location']['href']`.
-   - Traverse `MemberExpression` nodes. If `path.node.computed === true` and `path.node.property` is a `StringLiteral`:
-     - Test if the string is a valid JavaScript identifier using `/^[a-zA-Z_$][a-zA-Z0-9_$]*$/` and is not a reserved JavaScript keyword.
-     - Set `path.node.computed = false` and replace `path.node.property` with `t.identifier(value)`.
-     - Result: `window.document.location.href`.
+1. **String array function.** `function _0x15fa(){const a=['url','log',...];_0x15fa=function(){return a;};return _0x15fa();}`. Hoisted, so it often appears last.
+2. **Decoder.** `function _0x5c19(i,k){i=i-0x1d8;const a=_0x15fa();...}`. The offset (`0x1d8`) is per build. With `base64` or `rc4` encoding the decoder caches results on its own properties (`_0x5c19.abcd`). `rc4` passes a key as the second argument.
+3. **Rotation IIFE.** `(function(f,target){const a=f();while(!![]){try{const v=parseInt(d(0x1e1))/1*...;if(v===target)break;else a.push(a.shift());}catch(e){a.push(a.shift());}}}(_0x15fa,0x28126));`. It rotates until a checksum of decoded integers matches `target`. Run it; do not solve it.
+4. **Decoder aliases and wrappers.** `const _0x436e14=_0x5c19;` per function, and `function _0x291de2(a,b){return _0x5c19(b- -0xb1,a);}` wrappers whose arguments come from constant objects (`stringArrayCallsTransform`).
+5. **Proxy objects** (from control-flow flattening). `const o={'SXZVg':function(a,b){return a+b;},'JIEpX':'step'};` then `o.SXZVg(x,1)`.
+6. **Dispatcher** (`controlFlowFlattening` on long blocks). `const s='3|0|4|1|2'.split('|');let i=0;while(!![]){switch(s[i++]){case '0':...;continue;}break;}`.
+7. **Self-defending / debug protection.** Regex strings `(((.+)+)+)+$` and `function *\( *\)`, `\+\+ *(?:[a-zA-Z_$][0-9a-zA-Z_$]*)`, plus `"debugger"` via `constructor`. Reformatted output is designed to hang or throw. Delete those IIFEs; read the rest statically.
 
-5. **Control-Flow Unflattening (CFF)**:
-   - **Dispatcher Structure**: Linear code is chopped into basic blocks stored as cases in a `switch` statement enclosed in an infinite `while (true)` loop:
-     ```javascript
-     var _0xorder = '2|0|3|1'.split('|'), _0xidx = 0;
-     while (true) {
-         switch (_0xorder[_0xidx++]) {
-             case '0': stepOne(); continue;
-             case '1': stepThree(); break;
-             case '2': stepZero(); continue;
-             case '3': stepTwo(); continue;
-         }
-         break;
-     }
-     ```
-   - **Workflow**:
-     1. Traverse `WhileStatement` nodes where the test condition is `true` or `1`.
-     2. Identify the inner `SwitchStatement`.
-     3. Locate the state variable and preceding sequence definition (`'2|0|3|1'.split('|')`).
-     4. Build a hash map of `case` values to basic block statements (omitting the trailing `continue` or `break`).
-     5. Iterate over the parsed order array `['2', '0', '3', '1']`, collect the matching statements in execution sequence, and replace the entire `WhileStatement` with the restored linear sequence.
-     6. Delete the order array declaration and index variable.
+## Babel Deobfuscation Script
+Verified on `javascript-obfuscator` 5.9.0 presets: string array with none/base64/rc4 encoding, rotation, index shift, function wrappers (chained), `stringArrayCallsTransform`, `splitStrings`, `numbersToExpressions`, dead-code injection, `transformObjectKeys`, and a hand-written dispatcher. Output ran and printed the same result as the input. Self-defending output keeps the decoder and is for reading only.
 
----
+The `vm` module is not a security boundary. Run this inside the analysis VM, never on a host that holds credentials.
 
-### 4.3 JSVMP (JavaScript Virtual Machine Protection) Devirtualization
-JSVMP represents the highest tier of commercial JavaScript protection. Instead of altering JavaScript AST, JSVMP compiles original JavaScript into a proprietary bytecode format executed by an embedded interpreter in the browser.
-
-#### Architectural Breakdown of JSVMP:
-```text
-┌────────────────────────────────────────────────────────┐
-│                   JSVMP Architecture                   │
-│                                                        │
-│  Bytecode Stream: [0x12, 0x00, 0x04, 0x3A, 0x9F, ...]  │
-│  Virtual Registers / State: vpc (PC), vsp (Stack Top)  │
-│  Execution Stack: Array serving as LIFO operand stack  │
-│  Scope / Context Table: Local variables and globals    │
-└───────────────────────────┬────────────────────────────┘
-                            │
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                 Interpreter Loop                       │
-│                                                        │
-│  while (vpc < bytecode.length) {                       │
-│      const op = bytecode[vpc++];                       │
-│      switch (op) {                                     │
-│          case 0x10: // PUSH_IMM                        │
-│          case 0x11: // BIN_OP                          │
-│          case 0x12: // LOAD_PROP                       │
-│          case 0x13: // CALL_FUNC                       │
-│          case 0x14: // JUMP_IF                         │
-│      }                                                 │
-│  }                                                     │
-└────────────────────────────────────────────────────────┘
+```bash
+mkdir deob && cd deob && npm init -y >/dev/null
+npm i @babel/parser @babel/traverse @babel/generator @babel/types
+node deob.js "$IN_JS" out.js
 ```
-
-#### Step-by-Step Devirtualization Workflow:
-
-#### Step 1: Static Analysis of the Interpreter Loop
-1. Locate the entry point: Search for large arrays of numbers, base64 strings, or `Uint8Array` allocations, followed by an immediate call into a closure containing a `while` loop and large `switch`.
-2. Map the Virtual Opcode Table:
-   - Identify stack manipulation: `stack.push()`, `stack.pop()`.
-   - Identify environment manipulation: lookups against an environment object (`env[key]`).
-   - Identify JavaScript API reflection: `object[property]`, `func.apply(context, args)`.
-   - Classify opcodes:
-     - **Stack**: `PUSH`, `POP`, `DUP`.
-     - **Arithmetic/Bitwise**: `ADD`, `SUB`, `MUL`, `DIV`, `XOR`, `AND`, `OR`.
-     - **Object**: `GET_PROP`, `SET_PROP`.
-     - **Control Flow**: `JMP`, `JZ` (jump if zero), `JNZ`, `RET`.
-     - **Execution**: `CALL`, `NEW`.
-
-#### Step 2: Dynamic Trace-Based Analysis & JSHook MCP Integration
-Pure static analysis of JSVMP can be hindered by encrypted bytecode streams decrypted at runtime. Use dynamic tracing via Chrome DevTools Protocol (CDP), Playwright, or **JSHook MCP** (`@jshookmcp/jshook`) to instrument the dispatcher.
-
-1. **Automated Tracing via JSHook MCP**:
-   Leverage JSHook MCP's `install_function_hook` and `evaluate_script` tools (detailed in [04-tool-usage/jshook-mcp.md](../04-tool-usage/jshook-mcp.md)) to dynamically monitor virtual program counter progression and dump opcode traces:
-   ```javascript
-   // Discover and describe hook tool
-   // call_tool({ tool_name: "describe_tool", arguments: { tool_name: "install_function_hook" } })
-   call_tool({
-       tool_name: "install_function_hook",
-       arguments: {
-           page_id: "PAGE_1",
-           target_object: "window",
-           method_name: "_vmp_dispatch",
-           hook_code: `
-               window.__vmp_trace__ = window.__vmp_trace__ || [];
-               const orig = window._vmp_dispatch;
-               window._vmp_dispatch = function(op, vpc, stack, env) {
-                   window.__vmp_trace__.push({
-                       vpc: vpc,
-                       opcode: op,
-                       stackTop: stack ? stack.slice(-4) : [],
-                       timestamp: Date.now()
-                   });
-                   return orig.apply(this, arguments);
-               };
-           `
-       }
-   });
-   ```
-   Retrieve the complete trace using `evaluate_script` without interrupting asynchronous execution:
-   ```javascript
-   const traceData = call_tool({
-       tool_name: "evaluate_script",
-       arguments: {
-           page_id: "PAGE_1",
-           expression: "JSON.stringify(window.__vmp_trace__)"
-       }
-   });
-   ```
-   Feed the captured instruction stream directly into `VMDeobfuscator` (`call_tool({ tool_name: "VMDeobfuscator", arguments: { bytecode: rawBytecode, opcode_trace: traceData } })`) to recover high-level JavaScript statements.
-
-2. **Manual Dispatcher Hooking (Playwright / CDP)**: Hook into the interpreter loop right after the opcode is read:
-   ```javascript
-   // Injected hook in browser / CDP session
-   (function() {
-       const originalSwitch = window._vmp_dispatch;
-       window.vm_trace = [];
-       window._vmp_dispatch = function(op, vpc, stack, env) {
-           window.vm_trace.push({
-               vpc: vpc,
-               opcode: op,
-               stackSnapshot: stack.slice(-4), // Top 4 elements
-               operands: [/* read next bytecode bytes */]
-           });
-           return originalSwitch.apply(this, arguments);
-       };
-   })();
-   ```
-3. **Execution Tracing**: Trigger the application's target functionality (e.g., clicking a protected button, submitting an encrypted request).
-4. **Trace Extraction**: Dump the recorded `vm_trace` array containing the ordered sequence of virtual instructions and runtime operand values.
-#### Step 3: AST Generation from VM Trace
-1. **Symbolic Stack Reconstruction**:
-   - Initialize an empty symbolic stack.
-   - For every trace item:
-     - `PUSH_CONST(val)`: Push `t.stringLiteral(val)` or `t.numericLiteral(val)` onto the symbolic stack.
-     - `BIN_OP('+')`: Pop operand `B`, pop operand `A`, push `t.binaryExpression('+', A, B)`.
-     - `GET_PROP`: Pop property `P`, pop target `O`, push `t.memberExpression(O, P, true)`.
-     - `CALL(argc)`: Pop `argc` arguments, pop function `F`, pop context `C`, push `t.callExpression(F, args)`.
-     - `ASSIGN`: Pop value `V`, pop target `T`, generate `t.expressionStatement(t.assignmentExpression('=', T, V))`.
-2. **Linear AST Synthesis**: Append generated statement nodes to a clean Babel `Program` body and serialize with `@babel/generator` to recover readable, un-virtualized JavaScript.
-
-#### Tooling Ecosystem Matrix:
-| Tool | Core Capability | Best Suited For | Limitation |
-| :--- | :--- | :--- | :--- |
-| **`webcrack`** | Webpack unbundling, Obfuscator.io deobfuscation | Production web bundles, single-file bundles | Does not devirtualize complex custom JSVMP |
-| **`wakaru`** | TypeScript construct recovery, variable un-mangling | Clean output formatting, modern ES modules | Target must not use heavy virtualization |
-| **`synchrony`** | Semantic AST deobfuscator for Obfuscator.io | Control flow unflattening, string array rotation | Tuned specifically for JS-Obfuscator rules |
-| **Babel Custom Script** | Custom AST transformation rules | Proprietary obfuscation patterns, custom packers | Requires manual pattern identification |
-| **JSHook MCP (`@jshookmcp/jshook`)** | Automated CDP session control, `VMDeobfuscator`, stealth hooks | JSVMP devirtualization, dynamic request initiator tracing, AST deobfuscation | Requires Node.js MCP runtime (see [04-tool-usage/jshook-mcp.md](../04-tool-usage/jshook-mcp.md)) |
-| **Dynamic CDP Hook** | Opcode trace extraction | JSVMP bytecode reversing, runtime parameter dumping | Requires browser runtime environment |
-
-
----
-
-### 4.4 WebAssembly (`.wasm`) Binary Architecture
-WebAssembly is a compact binary format for stack-based virtual machines.
-
-#### WASM Section Structure:
-Each section begins with a 1-byte section ID and a LEB128-encoded byte length:
-- `ID 0`: Custom Section (often contains DWARF debug info or function names: `name`)
-- `ID 1`: Type Section (function signatures)
-- `ID 2`: Import Section (external functions, memory, globals imported from JS)
-- `ID 3`: Function Section (maps function index to type signature)
-- `ID 4`: Table Section (indirect function call tables)
-- `ID 5`: Memory Section (linear memory limits)
-- `ID 6`: Global Section (global variables)
-- `ID 7`: Export Section (functions and memory exported to JS)
-- `ID 10`: Code Section (function bodies and bytecode)
-- `ID 11`: Data Section (initialized memory segments, strings)
-
----
-
-### 4.5 WebAssembly Linear Memory & JS Boundary
-WASM operates over a contiguous byte array called **Linear Memory**, allocated in 64 KiB pages:
-
-```text
-JavaScript Environment
-      │
-      ▼
-WebAssembly.Memory({ initial: 256 })
-      │
-      ├── Linear Memory [0x00000000 - 0x01000000] (16 MB)
-      │    ├── .data / .rodata (Strings, constant structs)
-      │    ├── Stack (grows downwards)
-      │    └── Heap (managed by custom malloc/dlmalloc/walloc)
-      │
-      ▼
-WASM Exports:
-  - memory (ArrayBuffer)
-  - malloc(size) -> uint32_t ptr
-  - free(ptr)
-  - processData(ptr, len) -> uint32_t result
-```
-
-#### Reversing the JS-WASM Boundary:
-1. Identify JavaScript imports and exports:
-   ```javascript
-   const wasmInstance = await WebAssembly.instantiate(wasmBytes, {
-       env: {
-           memory: sharedMemory,
-           console_log: (ptr, len) => { ... }
-       }
-   });
-   ```
-2. Trace linear memory accesses:
-   - When JavaScript passes strings to WASM, it writes UTF-8 bytes into `wasmInstance.exports.memory.buffer` at an address returned by `wasmInstance.exports.malloc(len)`.
-   - In WAT disassembly, linear memory loads and stores appear as `i32.load`, `i64.load8_u`, `i32.store`.
-3. Recovering Function Names:
-   - If the custom section `name` exists, `wasm2wat` automatically recovers function names (`$malloc`, `$crypto_hash`).
-   - If stripped, check for standard C runtime function signatures (memcmp, strlen, memcpy) or standard library imports in Section 2.
-
----
-
-## 5. Concrete Code & Script Examples
-
-### Production-Grade Node.js Babel Deobfuscation Pipeline
-The following script is a complete, standalone, runnable deobfuscation engine. It implements string array extraction, sandbox rotation decoding, proxy function inlining, constant folding, dead-code branch pruning, property accessor normalization, and control-flow unflattening.
 
 ```javascript
-/**
- * deobfuscate_pipeline.js
- * Production-grade AST deobfuscator for Obfuscator.io / JavaScript-Obfuscator.
- * 
- * Dependencies:
- *   npm install @babel/parser @babel/traverse @babel/generator @babel/types
- * 
- * Usage:
- *   node deobfuscate_pipeline.js <input_obfuscated.js> [output_clean.js]
- */
-
-const fs = require('fs');
-const vm = require('vm');
+// deob.js: obfuscator.io string-array + wrapper + proxy-object + dispatcher cleanup. Node >= 18.
+const fs = require('fs'), vm = require('vm');
 const parser = require('@babel/parser');
-const traverse = require('@babel/traverse').default || require('@babel/traverse');
-const generate = require('@babel/generator').default || require('@babel/generator');
+const traverse = require('@babel/traverse').default;
+const generate = require('@babel/generator').default;
 const t = require('@babel/types');
 
-function runDeobfuscation(sourceCode) {
-    console.log('[*] Parsing source code into Babel AST...');
-    const ast = parser.parse(sourceCode, {
-        sourceType: 'unambiguous',
-        plugins: ['jsx']
-    });
+const ast = parser.parse(fs.readFileSync(process.argv[2], 'utf8'), { sourceType: 'unambiguous', errorRecovery: true });
+const reparse = () => traverse.cache.clear();      // scopes go stale after large edits
 
-    // =========================================================================
-    // PASS 1: String Array Unpacking & Sandbox Rotation Decoding
-    // =========================================================================
-    console.log('[*] Pass 1: Extracting and decoding string array rotation...');
-    if (ast.program.body.length >= 3) {
-        // Obfuscator.io puts the array, rotation IIFE, and helper function at the top
-        const candidateNodes = ast.program.body.slice(0, 3);
-        const sandboxAst = t.program(candidateNodes);
-        const sandboxCode = generate(sandboxAst).code;
-
-        // Determine helper function identifier name
-        let helperName = null;
-        const helperNode = ast.program.body[2];
-        if (t.isVariableDeclaration(helperNode) && helperNode.declarations.length > 0) {
-            helperName = helperNode.declarations[0].id.name;
-        } else if (t.isFunctionDeclaration(helperNode)) {
-            helperName = helperNode.id.name;
-        }
-
-        if (helperName) {
-            try {
-                const sandboxContext = vm.createContext({});
-                vm.runInContext(sandboxCode, sandboxContext, { timeout: 2000 });
-
-                if (typeof sandboxContext[helperName] === 'function') {
-                    let inlinedCount = 0;
-                    traverse(ast, {
-                        CallExpression(path) {
-                            if (t.isIdentifier(path.node.callee, { name: helperName })) {
-                                const args = path.node.arguments;
-                                if (args.length >= 1 && args.every(a => t.isNumericLiteral(a) || t.isStringLiteral(a))) {
-                                    const evaluatedArgs = args.map(a => a.value);
-                                    try {
-                                        const decrypted = sandboxContext[helperName](...evaluatedArgs);
-                                        if (typeof decrypted === 'string') {
-                                            path.replaceWith(t.stringLiteral(decrypted));
-                                            inlinedCount++;
-                                        } else if (typeof decrypted === 'number') {
-                                            path.replaceWith(t.numericLiteral(decrypted));
-                                            inlinedCount++;
-                                        }
-                                    } catch (e) {
-                                        // Ignore evaluation faults on non-standard arguments
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    console.log(`[+] Pass 1: Inlined ${inlinedCount} string array call sites.`);
-                    // Remove the three scaffolding nodes from the program body
-                    ast.program.body.splice(0, 3);
-                }
-            } catch (err) {
-                console.warn(`[-] Pass 1: Sandbox rotation execution failed (${err.message}). Proceeding.`);
-            }
-        }
+function substitute(expr, params, args) {          // body of `function w(a,b){return D(b-1,a)}` with args bound
+  const map = new Map(params.map((p, i) => [p.name, args[i] ?? t.identifier('undefined')]));
+  const walk = n => {
+    if (t.isIdentifier(n) && map.has(n.name)) return t.cloneNode(map.get(n.name));
+    for (const k of t.VISITOR_KEYS[n.type] || []) {
+      const v = n[k];
+      if (Array.isArray(v)) n[k] = v.map(c => c && walk(c)); else if (v) n[k] = walk(v);
     }
-
-    // =========================================================================
-    // PASS 2: Proxy Function Inlining
-    // =========================================================================
-    console.log('[*] Pass 2: Inlining proxy operator/call wrapper functions...');
-    const proxyFunctions = new Map();
-
-    traverse(ast, {
-        FunctionDeclaration(path) {
-            const { id, params, body } = path.node;
-            if (!id || body.body.length !== 1) return;
-            const stmt = body.body[0];
-            if (!t.isReturnStatement(stmt)) return;
-            const arg = stmt.argument;
-
-            // Pattern A: Binary Expression proxy -> function _0x1(a, b) { return a + b; }
-            if (t.isBinaryExpression(arg) &&
-                t.isIdentifier(arg.left) && t.isIdentifier(arg.right) &&
-                params.length === 2 &&
-                params[0].name === arg.left.name && params[1].name === arg.right.name) {
-                proxyFunctions.set(id.name, {
-                    kind: 'binary',
-                    operator: arg.operator,
-                    path
-                });
-            }
-            // Pattern B: Call Expression proxy -> function _0x2(fn, a) { return fn(a); }
-            else if (t.isCallExpression(arg) &&
-                t.isIdentifier(arg.callee) &&
-                params.length > 0 &&
-                params[0].name === arg.callee.name) {
-                proxyFunctions.set(id.name, {
-                    kind: 'call',
-                    path
-                });
-            }
-        }
-    });
-
-    let proxyInlinedCount = 0;
-    for (const [name, info] of proxyFunctions.entries()) {
-        traverse(ast, {
-            CallExpression(path) {
-                if (t.isIdentifier(path.node.callee, { name })) {
-                    if (info.kind === 'binary' && path.node.arguments.length === 2) {
-                        path.replaceWith(t.binaryExpression(info.operator, path.node.arguments[0], path.node.arguments[1]));
-                        proxyInlinedCount++;
-                    } else if (info.kind === 'call' && path.node.arguments.length >= 1) {
-                        const targetFn = path.node.arguments[0];
-                        const callArgs = path.node.arguments.slice(1);
-                        path.replaceWith(t.callExpression(targetFn, callArgs));
-                        proxyInlinedCount++;
-                    }
-                }
-            }
-        });
-        info.path.remove();
-    }
-    console.log(`[+] Pass 2: Inlined ${proxyInlinedCount} proxy calls across ${proxyFunctions.size} functions.`);
-
-    // =========================================================================
-    // PASS 3: Constant Folding & Dead-Code Branch Pruning
-    // =========================================================================
-    console.log('[*] Pass 3: Constant folding and dead-code pruning...');
-    let foldedCount = 0;
-    let prunedBranches = 0;
-
-    traverse(ast, {
-        // Fold constant binary expressions: 1 + 2 -> 3, "a" + "b" -> "ab"
-        BinaryExpression(path) {
-            const evaluated = path.evaluate();
-            if (evaluated.confident) {
-                path.replaceWith(t.valueToNode(evaluated.value));
-                foldedCount++;
-            }
-        },
-        // Fold constant unary expressions: ![] -> false, - -1 -> 1
-        UnaryExpression(path) {
-            const evaluated = path.evaluate();
-            if (evaluated.confident) {
-                path.replaceWith(t.valueToNode(evaluated.value));
-                foldedCount++;
-            }
-        },
-        // Prune dead IfStatement branches
-        IfStatement(path) {
-            const test = path.get('test');
-            const evaluated = test.evaluate();
-            if (evaluated.confident) {
-                if (evaluated.value) {
-                    if (path.node.consequent) {
-                        path.replaceWith(path.node.consequent);
-                    } else {
-                        path.remove();
-                    }
-                } else {
-                    if (path.node.alternate) {
-                        path.replaceWith(path.node.alternate);
-                    } else {
-                        path.remove();
-                    }
-                }
-                prunedBranches++;
-            }
-        },
-        // Prune dead ConditionalExpressions (ternaries)
-        ConditionalExpression(path) {
-            const test = path.get('test');
-            const evaluated = test.evaluate();
-            if (evaluated.confident) {
-                if (evaluated.value) {
-                    path.replaceWith(path.node.consequent);
-                } else {
-                    path.replaceWith(path.node.alternate);
-                }
-                prunedBranches++;
-            }
-        }
-    });
-    console.log(`[+] Pass 3: Folded ${foldedCount} constant expressions, pruned ${prunedBranches} dead branches.`);
-
-    // =========================================================================
-    // PASS 4: Property Accessor Normalization (Bracket to Dot Notation)
-    // =========================================================================
-    console.log('[*] Pass 4: Normalizing property accessors (window["document"] -> window.document)...');
-    let normalizedAccessors = 0;
-    const validIdentifierRegex = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
-    const reservedWords = new Set([
-        'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
-        'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'function',
-        'if', 'import', 'in', 'instanceof', 'new', 'return', 'super', 'switch',
-        'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield'
-    ]);
-
-    traverse(ast, {
-        MemberExpression(path) {
-            const prop = path.node.property;
-            if (path.node.computed && t.isStringLiteral(prop)) {
-                const propName = prop.value;
-                if (validIdentifierRegex.test(propName) && !reservedWords.has(propName)) {
-                    path.node.computed = false;
-                    path.node.property = t.identifier(propName);
-                    normalizedAccessors++;
-                }
-            }
-        }
-    });
-    console.log(`[+] Pass 4: Normalized ${normalizedAccessors} member access expressions.`);
-
-    // =========================================================================
-    // PASS 5: Control-Flow Unflattening (CFF)
-    // =========================================================================
-    console.log('[*] Pass 5: Unflattening control-flow state machines...');
-    let unflattenedLoops = 0;
-
-    traverse(ast, {
-        WhileStatement(path) {
-            const { test, body } = path.node;
-            // Target while (true) or while (1)
-            const isInfinite = t.isBooleanLiteral(test, { value: true }) || t.isNumericLiteral(test, { value: 1 });
-            if (!isInfinite || !t.isBlockStatement(body)) return;
-
-            const switchStmt = body.body.find(stmt => t.isSwitchStatement(stmt));
-            if (!switchStmt) return;
-
-            // Locate preceding order array declaration: var _0xorder = "3|1|0|2".split("|")
-            const prevSibling = path.getPrevSibling();
-            const prevPrevSibling = prevSibling && prevSibling.getPrevSibling ? prevSibling.getPrevSibling() : null;
-
-            const extractOrder = (siblingPath) => {
-                if (!siblingPath || !siblingPath.isVariableDeclaration()) return null;
-                for (const decl of siblingPath.node.declarations) {
-                    if (t.isCallExpression(decl.init) &&
-                        t.isMemberExpression(decl.init.callee) &&
-                        t.isStringLiteral(decl.init.callee.object) &&
-                        t.isIdentifier(decl.init.callee.property, { name: 'split' })) {
-                        const sep = decl.init.arguments[0];
-                        if (t.isStringLiteral(sep)) {
-                            return {
-                                order: decl.init.callee.object.value.split(sep.value),
-                                path: siblingPath
-                            };
-                        }
-                    }
-                }
-                return null;
-            };
-
-            const orderInfo = extractOrder(prevSibling) || extractOrder(prevPrevSibling);
-            if (orderInfo) {
-                const caseMap = new Map();
-                for (const sc of switchStmt.cases) {
-                    if (t.isStringLiteral(sc.test) || t.isNumericLiteral(sc.test)) {
-                        const key = String(sc.test.value);
-                        // Exclude jump control directives (continue, break) from basic block
-                        const stmts = sc.consequent.filter(s => !t.isContinueStatement(s) && !t.isBreakStatement(s));
-                        caseMap.set(key, stmts);
-                    }
-                }
-
-                const linearStatements = [];
-                for (const key of orderInfo.order) {
-                    const stmts = caseMap.get(key);
-                    if (stmts) {
-                        linearStatements.push(...stmts);
-                    }
-                }
-
-                if (linearStatements.length > 0) {
-                    path.replaceWithMultiple(linearStatements);
-                    orderInfo.path.remove();
-                    if (prevPrevSibling && prevPrevSibling.isVariableDeclaration()) {
-                        prevPrevSibling.remove();
-                    } else if (prevSibling && prevSibling.isVariableDeclaration()) {
-                        prevSibling.remove();
-                    }
-                    unflattenedLoops++;
-                }
-            }
-        }
-    });
-    console.log(`[+] Pass 5: Unflattened ${unflattenedLoops} state machine dispatch loops.`);
-
-    console.log('[*] Generating clean JavaScript code...');
-    const output = generate(ast, {
-        retainLines: false,
-        compact: false,
-        comments: true
-    }).code;
-
-    return output;
+    return n;
+  };
+  return walk(t.cloneNode(expr));
+}
+function singleReturn(fn) {                        // `function(a,b){return <expr>}`, each param used once
+  if (!(t.isFunctionExpression(fn) || t.isFunctionDeclaration(fn)) || fn.body.body.length !== 1 ||
+      !t.isReturnStatement(fn.body.body[0]) || !fn.params.every(q => t.isIdentifier(q))) return null;
+  const r = fn.body.body[0].argument, seen = {};
+  let ok = !!r;
+  traverse(t.file(t.program([t.expressionStatement(t.cloneNode(r))])), { noScope: true,
+    Identifier(q) { if (fn.params.some(x => x.name === q.node.name) && ++seen[q.node.name] > 1) ok = false;
+                    seen[q.node.name] ??= 1; } });
+  return ok ? r : null;
 }
 
-// CLI Execution Entry Point
-if (require.main === module) {
-    const args = process.argv.slice(2);
-    if (args.length === 0) {
-        console.log('Usage: node deobfuscate_pipeline.js <input.js> [output.js]');
-        process.exit(1);
+// 1. Proxy/storage objects: o = {k:'s', f:function(a,b){return a+b}}; o.j = ...; p = o; p.f(x,y) -> x+y
+function inlineObjects() {
+  let n = 0; reparse();
+  traverse(ast, { VariableDeclarator(p) {
+    const { id, init } = p.node;
+    if (!t.isIdentifier(id) || !t.isObjectExpression(init)) return;
+    const map = new Map(), extra = [];
+    const okVal = v => t.isStringLiteral(v) || t.isNumericLiteral(v) || singleReturn(v);
+    for (const q of init.properties) {
+      if (!t.isObjectProperty(q) || q.computed || !okVal(q.value)) return;
+      map.set(q.key.name ?? q.key.value, q.value);
     }
-    const inputPath = args[0];
-    const outputPath = args[1] || 'deobfuscated.clean.js';
-
-    const source = fs.readFileSync(inputPath, 'utf-8');
-    const cleaned = runDeobfuscation(source);
-    fs.writeFileSync(outputPath, cleaned, 'utf-8');
-    console.log(`[+] Success! Clean source written to: ${outputPath}`);
+    for (let s = p.parentPath.getNextSibling(); s.node; s = s.getNextSibling()) {   // trailing o.k = v, ...
+      if (s.isFunctionDeclaration()) continue;
+      if (!s.isExpressionStatement()) break;
+      const ex = t.isSequenceExpression(s.node.expression) ? s.node.expression.expressions : [s.node.expression];
+      if (!ex.every(e => t.isAssignmentExpression(e, { operator: '=' }) && t.isMemberExpression(e.left) &&
+          t.isIdentifier(e.left.object, { name: id.name }) && okVal(e.right))) break;
+      ex.forEach(e => map.set(e.left.computed ? e.left.property.value : e.left.property.name, e.right));
+      extra.push(s);
+    }
+    const b = p.scope.getBinding(id.name);
+    if (!map.size || !b || b.constantViolations.length) return;
+    const refs = [], aliases = [];
+    const collect = bind => { for (const r of bind.referencePaths) {
+      if (extra.some(s => r.isDescendant(s))) continue;
+      if (r.parentPath.isVariableDeclarator({ init: r.node })) {
+        const ab = r.scope.getBinding(r.parent.id.name);
+        if (!ab || ab.constantViolations.length) throw 0;
+        aliases.push(r.parentPath); collect(ab); continue;
+      }
+      const m = r.parentPath;
+      const key = m.isMemberExpression({ object: r.node }) &&
+        (m.node.computed ? t.isStringLiteral(m.node.property) && m.node.property.value : m.node.property.name);
+      if (!key || !map.has(key) || m.parentPath.isAssignmentExpression({ left: m.node })) throw 0;
+      if (!t.isLiteral(map.get(key)) && !m.parentPath.isCallExpression({ callee: m.node })) throw 0;
+      refs.push([m, map.get(key)]);
+    }};
+    try { collect(b); } catch { return; }          // object escapes: leave it alone
+    refs.sort((x, y) => (y[0].node.start ?? 0) - (x[0].node.start ?? 0));   // innermost first
+    for (const [m, v] of refs) {
+      if (t.isLiteral(v)) m.replaceWith(t.cloneNode(v));
+      else m.parentPath.replaceWith(substitute(singleReturn(v), v.params, m.parent.arguments));
+      n++;
+    }
+    aliases.reverse().forEach(a => a.removed || a.remove()); extra.forEach(s => s.remove()); p.remove();
+  }});
+  return n;
 }
 
-module.exports = { runDeobfuscation };
+// 2. String array fn + decoder(s) + rotation IIFE, executed once in a vm context.
+function findDecoders() {
+  let arrFn = null; const decoders = new Set(), setup = [];
+  for (const s of ast.program.body)
+    if (t.isFunctionDeclaration(s) && s.body.body.some(x => t.isVariableDeclaration(x) &&
+        x.declarations.some(d => t.isArrayExpression(d.init) && d.init.elements.length > 3 &&
+          d.init.elements.every(e => t.isStringLiteral(e))))) arrFn = s.id.name;
+  if (!arrFn) return null;
+  for (const s of ast.program.body) {
+    if (t.isFunctionDeclaration(s) && s.id.name !== arrFn && generate(s).code.includes(arrFn + '()')) decoders.add(s.id.name);
+    if (t.isFunctionDeclaration(s) && (s.id.name === arrFn || decoders.has(s.id.name))) setup.push(s);
+    if (t.isExpressionStatement(s) && t.isCallExpression(s.expression) &&
+        t.isIdentifier(s.expression.arguments[0], { name: arrFn })) setup.push(s);
+  }
+  const ctx = vm.createContext({});
+  vm.runInContext(setup.map(s => generate(s).code).join('\n'), ctx, { timeout: 5000 });
+  return { ctx, decoders, setup, names: [arrFn, ...decoders] };
+}
+
+// 3. Collapse aliases and wrappers into decoder calls; replace literal-argument calls with strings.
+function decodeCalls({ ctx, decoders }) {
+  let n = 0;
+  for (let changed = true; changed;) {
+    changed = false; reparse();
+    traverse(ast, { CallExpression(p) {
+      const c = p.node.callee;
+      if (!t.isIdentifier(c)) return;
+      const b = p.scope.getBinding(c.name);
+      if (decoders.has(c.name) && (!b || b.path.isFunctionDeclaration() && b.path.parentPath.isProgram())) {
+        const args = p.get('arguments').map(a => a.evaluate());
+        if (!args.every(a => a.confident)) return;
+        const v = ctx[c.name](...args.map(a => a.value));
+        if (typeof v === 'string') { p.replaceWith(t.stringLiteral(v)); n++; changed = true; }
+        return;
+      }
+      if (!b) return;
+      if (b.path.isVariableDeclarator() && t.isIdentifier(b.path.node.init) && decoders.has(b.path.node.init.name)) {
+        p.node.callee = t.identifier(b.path.node.init.name); changed = true; return;
+      }
+      const fn = b.path.node, r = t.isFunctionDeclaration(fn) && singleReturn(fn);
+      if (r && t.isCallExpression(r) && t.isIdentifier(r.callee)) {
+        p.replaceWith(substitute(r, fn.params, p.node.arguments)); changed = true;
+      }
+    }});
+  }
+  return n;
+}
+
+// 4. Constant folding, dead branches, dot access.
+function fold() {
+  reparse();
+  traverse(ast, {
+    'BinaryExpression|UnaryExpression|LogicalExpression'(p) {
+      if (p.isUnaryExpression({ operator: 'void' })) return;
+      let e; try { e = p.evaluate(); } catch { return; }
+      if (e.confident && ['string', 'number', 'boolean'].includes(typeof e.value) &&
+          !(typeof e.value === 'number' && !Number.isFinite(e.value))) p.replaceWith(t.valueToNode(e.value));
+    },
+    'IfStatement|ConditionalExpression'(p) {
+      const e = p.get('test').evaluate();
+      if (!e.confident) return;
+      const keep = e.value ? p.node.consequent : p.node.alternate;
+      if (!keep) p.remove();
+      else if (t.isBlockStatement(keep) && p.isStatement()) p.replaceWithMultiple(keep.body);
+      else p.replaceWith(keep);
+    },
+    MemberExpression(p) {
+      const k = p.node.property;
+      if (p.node.computed && t.isStringLiteral(k) && t.isValidIdentifier(k.value)) {
+        p.node.computed = false; p.node.property = t.identifier(k.value);
+      }
+    },
+  });
+}
+
+// 5. Dispatcher: const s='2|0|1'.split('|'); let i=0; while(true){switch(s[i++]){...}break;}
+function unflatten() {
+  let n = 0; reparse();
+  traverse(ast, { WhileStatement(p) {
+    const body = p.node.body.body;
+    if (!t.isBooleanLiteral(p.node.test, { value: true }) || !body || !t.isSwitchStatement(body[0])) return;
+    const disc = body[0].discriminant;
+    if (!t.isMemberExpression(disc) || !t.isIdentifier(disc.object)) return;
+    const b = p.scope.getBinding(disc.object.name), init = b && b.path.node.init;
+    if (!init || !t.isCallExpression(init) || !t.isStringLiteral(init.callee.object)) return;
+    const order = init.callee.object.value.split(init.arguments[0].value);
+    const cases = new Map(body[0].cases.map(c => [String(c.test.value),
+      c.consequent.filter(s => !t.isContinueStatement(s) && !t.isBreakStatement(s))]));
+    const out = order.flatMap(k => cases.get(k) || []);
+    if (!out.length) return;
+    const idx = t.isUpdateExpression(disc.property) && p.scope.getBinding(disc.property.argument.name);
+    p.replaceWithMultiple(out); b.path.remove(); if (idx) idx.path.remove(); n++;
+  }});
+  return n;
+}
+
+function cleanup() {                               // unreferenced wrappers and aliases
+  for (let again = true; again;) {
+    again = false; reparse();
+    traverse(ast, { Program(p) { p.scope.crawl(); },
+      'FunctionDeclaration|VariableDeclarator'(p) {
+        const id = p.node.id; if (!t.isIdentifier(id) || p.parentPath.isProgram()) return;
+        const b = p.scope.getBinding(id.name);
+        const pure = p.isFunctionDeclaration() ? singleReturn(p.node) : t.isIdentifier(p.node.init);
+        if (b && !b.referenced && pure) { p.remove(); again = true; }
+      } });
+  }
+}
+
+inlineObjects();
+const dec = findDecoders();
+if (dec) console.error('[+] decoded', decodeCalls(dec), 'calls via', [...dec.decoders]);
+fold();
+for (let i = 0; i < 5 && inlineObjects(); i++) fold();
+cleanup();
+console.error('[+] unflattened', unflatten(), 'dispatchers');
+fold();
+if (dec) {                                         // keep the decoder if dynamic-argument calls remain
+  let used = false;
+  traverse(ast, { Identifier(p) {
+    if (dec.names.includes(p.node.name) && !dec.setup.some(s => p.findParent(q => q.node === s))) used = true;
+  } });
+  if (!used) dec.setup.forEach(s => ast.program.body.splice(ast.program.body.indexOf(s), 1));
+  else console.error('[!] decoder still referenced; kept');
+}
+fs.writeFileSync(process.argv[3] || 'out.js', generate(ast, { jsescOption: { minimal: true } }).code);
 ```
 
----
+Adapting it. A decoder that is a `var x = function(){}` instead of a declaration needs `findDecoders` extended. Strings decoded inside a closure that is not top-level need the closure source in `setup`. Dispatchers whose order comes from a decoded string work only after pass 3. Rename `_0x` identifiers last with `path.scope.rename(old, new)`; never with regex.
 
-### Dynamic JSVMP Tracing Script (Playwright + CDP)
-Use this script to trace JSVMP dispatcher execution, dumping opcode flow and operands at runtime.
+## JSVMP
+A JSVMP compiles JS into private bytecode run by an interpreter in the page. There is no AST to clean.
+
+1. **Find the interpreter.** A function with a `while`/`for(;;)` around a `switch` with 50+ numeric cases, an array used as a stack (`s[++p]=`, `s[p--]`), and an index that advances through a byte array or decoded string. The bytecode is usually a long base64 or `\x` string decoded once at start.
+2. **Map handlers statically.** For each case, write one line: stack effect, operand width, side effect. Group: push const, load/store var, get/set property, call/new, arithmetic, compare, jump, return, closure create, try/catch.
+3. **Disassemble.** With the operand widths known, write a linear disassembler for the decoded bytecode. Jumps give basic blocks.
+4. **Trace only to fill gaps.** Log `(pc, opcode, top of stack)` at the dispatch point in the lab. A trace covers one path; the disassembler covers all.
+5. **Lift.** Symbolic stack per basic block: `PUSH c` pushes a literal node, `ADD` pops two and pushes `a+b`, `CALL n` pops n args and a callee and emits a call. Emit Babel nodes and print with `@babel/generator`.
+
+Commercial anti-bot VMs re-randomize opcode numbering per build. Key the handler map on handler semantics, not on opcode numbers. For request-signing targets, it is often cheaper to treat the VM as a black box and call it (RPC through the page) than to lift it. Record which one you did.
+
+## Dynamic (When Execution Is Allowed)
+Run only in the lab browser profile. The jshook MCP server covers CDP hooks, script search, and JSVMP tracing: [jshook-mcp.md](../04-tool-usage/jshook-mcp.md).
+
+Anti-debug traps and their counters:
+
+| Trap | Counter |
+| :--- | :--- |
+| `setInterval(()=>(function(){}).constructor("debugger")(),200)` | CDP `Debugger.setSkipAllPauses {skip:true}` or DevTools "Deactivate breakpoints". Do not edit the page. |
+| Timing check around `debugger` (`Date.now()`/`performance.now()` delta) | Skip-all-pauses removes the delay. |
+| DevTools-open detection via `console.log` of an object with a getter, or window size delta | Headless CDP session, not DevTools UI. |
+| `Function.prototype.toString` / `fn.toString().length` integrity checks | Hook with a `Proxy` that preserves `toString`, or patch after the check. |
+| Code that re-fetches itself and compares hashes | Serve a local copy through the proxy; see [network-traffic-proxy.md](../02-dynamic-instrumentation/network-traffic-proxy.md). |
+
+Script capture over CDP. Every parsed script, including `eval` and `new Function` output, arrives in `Debugger.scriptParsed`. Verified with `playwright-core` and installed Chrome; it saved an `eval`'d payload and did not stop on `debugger` traps.
 
 ```javascript
-/**
- * jsvmp_trace_tracer.js
- * Injects a runtime hook into the browser to capture JSVMP virtual execution.
- * 
- * Dependencies:
- *   npm install playwright
- */
-
-const { chromium } = require('playwright');
-const fs = require('fs');
-
+// dump_scripts.js: npm i playwright-core ; node dump_scripts.js "$URL" ./scripts
+const { chromium } = require('playwright-core');
+const fs = require('fs'), path = require('path'), crypto = require('crypto');
 (async () => {
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
-    const page = await context.newPage();
-
-    // Hook the virtual machine interpreter before scripts load
-    await page.addInitScript(() => {
-        window.__jsvmp_trace__ = [];
-
-        // Intercept Function constructor and eval if dynamic compilation is used
-        const origFunction = window.Function;
-        window.Function = function(...args) {
-            console.log('[+] Dynamic Function created with args:', args.slice(0, -1));
-            return origFunction.apply(this, args);
-        };
-
-        // Utility to attach to custom interpreter dispatchers
-        window.__attachVmpHook = function(vmInstance, dispatcherPropName) {
-            const originalDispatcher = vmInstance[dispatcherPropName];
-            vmInstance[dispatcherPropName] = function(opcode, vpc, stack, env) {
-                window.__jsvmp_trace__.push({
-                    vpc,
-                    opcode,
-                    topStack: stack ? stack.slice(-2) : null,
-                    timestamp: performance.now()
-                });
-                return originalDispatcher.apply(this, arguments);
-            };
-            console.log('[+] Attached hook to VM dispatcher:', dispatcherPropName);
-        };
-    });
-
-    console.log('[*] Navigating to target application...');
-    await page.goto('https://target.local/protected_app.html', { waitUntil: 'networkidle' });
-
-    // Extract captured trace logs
-    const trace = await page.evaluate(() => window.__jsvmp_trace__);
-    fs.writeFileSync('jsvmp_trace.json', JSON.stringify(trace, null, 2));
-    console.log(`[+] Captured ${trace.length} virtual instruction executions. Saved to jsvmp_trace.json`);
-
-    await browser.close();
+  const [url, out = 'scripts'] = process.argv.slice(2);
+  fs.mkdirSync(out, { recursive: true });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const page = await (await browser.newContext()).newPage();
+  const cdp = await page.context().newCDPSession(page);
+  const seen = [];
+  cdp.on('Debugger.scriptParsed', async (s) => {
+    try {
+      const { scriptSource } = await cdp.send('Debugger.getScriptSource', { scriptId: s.scriptId });
+      const name = crypto.createHash('sha1').update(scriptSource).digest('hex').slice(0, 12) + '.js';
+      fs.writeFileSync(path.join(out, name), scriptSource);
+      seen.push({ file: name, url: s.url || '(eval)', sourceMapURL: s.sourceMapURL || '' });
+    } catch {}
+  });
+  await cdp.send('Debugger.enable');
+  await cdp.send('Debugger.setSkipAllPauses', { skip: true });
+  await page.goto(url, { waitUntil: 'load' });
+  await page.waitForTimeout(3000);
+  fs.writeFileSync(path.join(out, 'index.json'), JSON.stringify(seen, null, 1));
+  await browser.close();
 })();
 ```
 
----
+Hooks that must run before page code use `page.addInitScript()` (CDP `Page.addScriptToEvaluateOnNewDocument`). Hook `crypto.subtle.importKey`/`encrypt`/`sign`, `TextEncoder.prototype.encode`, `WebAssembly.instantiate`, and `XMLHttpRequest.prototype.send` to catch keys and plaintext at the boundary.
 
-## 6. Boundaries & Anti-Patterns
-- **Do not execute raw untrusted JavaScript in the host Node environment**: Obfuscated malware and anti-tamper scripts check for the Node.js runtime (`process.versions.node`, `global`) and trigger intentional infinite loops, memory crashes, or malicious child process executions. Always isolate execution inside `vm.createContext({})` with explicit timeouts.
-- **Do not blindly replace CallExpression nodes without argument type verification**: When decoding string array lookups (`_0x4f2a(...)`), verify that all parameters are literals (`t.isNumericLiteral` or `t.isStringLiteral`). Passing dynamic identifier expressions to the sandbox helper will throw runtime exceptions or produce corrupt outputs.
-- **Do not decompile WASM expecting original high-level C++ or Rust classes**: WASM flattens all memory allocations into index offsets on a raw linear memory array (`i32.load`, `i32.store`). High-level struct declarations and member names are erased unless DWARF debug information was explicitly retained.
-- **Do not treat single-file bundles as monolithic code**: Use automated chunk splitters (`webcrack`) before analyzing business logic; reading a 50,000-line single-line bundle by hand is error-prone and inefficient.
-- **Do not perform cross-file renames with regex or text search**: In multi-module bundles, short mangled identifiers (`a`, `b`, `c`) repeat hundreds of times in different lexical scopes. Always utilize AST-based scope analysis (`path.scope.rename`) to avoid collisions.
+## Electron
+An Electron app is Chromium plus Node. The main process has full Node. Renderers have Node only when the app grants it.
+
+```bash
+APP="/Applications/Some.app"            # Windows/Linux: <install>/resources/app.asar
+ASAR="$APP/Contents/Resources/app.asar"
+npx -y @electron/asar@4.3.1 list "$ASAR" | head
+npx -y @electron/asar@4.3.1 extract "$ASAR" ./app_src        # also needs app.asar.unpacked/ beside it
+npx -y @electron/fuses@2.1.3 read --app "$APP"               # RunAsNode, inspect args, asar integrity, OnlyLoadAppFromAsar
+plutil -p "$APP/Contents/Info.plist" | grep -A3 ElectronAsarIntegrity   # macOS header hash
+```
+
+- **ASAR layout.** `u32 4`, `u32 header_size`, `u32 pickle_payload_size`, `u32 json_len`, JSON header, then file data at `8 + header_size`. All little-endian. The JSON lists `size`, `offset` (as a string), `unpacked`, and per-file `integrity` (SHA-256 plus 4 MB block hashes). Verified with `@electron/asar` 4.3.1. The npm package `asar` is the deprecated name; use `@electron/asar`.
+- **Integrity.** With `EnableEmbeddedAsarIntegrityValidation` on, the header hash is in `Info.plist` (`ElectronAsarIntegrity`) on macOS and in a resource on Windows. A modified asar does not load until that hash is updated. Read-only analysis does not need this.
+- **Entry.** `package.json` `main` is the main-process script. Grep it for `new BrowserWindow(` and read `webPreferences`.
+- **Trust boundary table.**
+
+| `webPreferences` | Risk |
+| :--- | :--- |
+| `nodeIntegration: true` | Any XSS in the renderer is code execution. |
+| `contextIsolation: false` (default `true` since Electron 12) | Page JS shares globals with the preload; prototype pollution reaches preload APIs. |
+| `sandbox: false` (default `true` since Electron 20) | Preload has Node. |
+| `preload` + `contextBridge.exposeInMainWorld('api', {...})` | This object is the API surface. Read every exposed function. |
+| `webSecurity: false`, `allowRunningInsecureContent` | Same-origin policy off. |
+| `ipcMain.handle(channel, ...)` without `event.senderFrame` origin check | Any frame, including an iframe, can call it. |
+| `shell.openExternal(url)` with page-controlled `url` | Opens arbitrary protocol handlers. |
+
+- **Main-process debugging** (lab only). `--inspect=9229` works only when `EnableNodeCliInspectArguments` is enabled. `ELECTRON_RUN_AS_NODE=1` works only when `RunAsNode` is enabled. Renderers accept `--remote-debugging-port=9222` unless the app strips it.
+
+## V8 Bytecode (`.jsc`, bytenode, V8 snapshots)
+bytenode saves V8 code cache from `vm.Script` `produceCachedData`. Function bodies are bytecode; source text is replaced with placeholders, so `Function.prototype.toString` shows nothing useful.
+
+- The cache is tied to one V8 version and flag set. Get the version from the host binary (`node -p process.versions.v8`, or Electron's version from `Info.plist`/`process.versions`).
+- View8 (`suleram/View8`) decompiles serialized V8 objects using a d8 build matched to that version. `ghidra_nodejs` is archived and supports only old Node 8-era bytecode.
+- Strings and property names survive in the constant pool. `strings -el`/`strings` on the `.jsc` is a fast first look.
+- Electron `LoadBrowserProcessSpecificV8Snapshot` and custom snapshots (`v8_context_snapshot.bin`) can hold app code. Check the fuse before assuming all code is in the asar.
+
+## WebAssembly
+Header: `00 61 73 6D` then version `01 00 00 00`. Each section is `id:u8`, `size:LEB128`, payload.
+
+| ID | Section | Why it matters |
+| :--- | :--- | :--- |
+| 0 | custom | `name` (function/local names), `producers` (clang/rustc/emscripten versions), `target_features`, `.debug_*` DWARF, `sourceMappingURL`, `go:buildid`, `dylink.0` |
+| 1 | type | Function signatures |
+| 2 | import | The JS/WASI boundary. Names reveal the toolchain. |
+| 3 | function | Type index per defined function |
+| 4 | table | `funcref` table for `call_indirect` (vtables, function pointers) |
+| 5 | memory | Linear memory limits in 64 KiB pages |
+| 6 | global | `__stack_pointer` is usually global 0 |
+| 7 | export | Entry points called from JS |
+| 8 | start | Runs at instantiation |
+| 9 | element | Initial table contents: maps indirect-call indices to functions |
+| 10 | code | Function bodies |
+| 11 | data | Initialized memory. Strings and constant tables at fixed addresses. |
+| 12 | datacount | Needed for bulk memory |
+| 13 | tag | Exception handling |
+
+```bash
+# wabt 1.0.42 and wasm-tools 1.263.0, verified on clang- and Go-built modules.
+wasm-objdump -h "$WASM"                       # section list, custom section names
+wasm-objdump -x -j Import -j Export "$WASM"   # boundary
+wasm-objdump -x -j Data "$WASM"               # data segments with hex/ASCII and load address
+wasm-objdump -d "$WASM" > dis.txt             # disassembly with byte offsets
+wasm2wat "$WASM" -o mod.wat
+wasm-tools print "$WASM" | head; wasm-tools objdump "$WASM"
+wasm-tools demangle "$WASM" -o demangled.wasm # Rust/C++ names in the name section
+wasm-opt "$WASM" --func-metrics --print-call-graph -o /dev/null   # binaryen version_133
+```
+
+- `wasm-decompile` was removed in wabt 1.0.42 (commit "Remove wasm-decompile (#2769)", June 2026). The 1.0.41 release still ships it: `wasm-decompile "$WASM" -o mod.dcmp`. It prints readable pseudo-C with recovered loads (`a[0]`) and data segments.
+- Native decompiler path. `wasm2c "$WASM" -o mod.c`, then `clang -c -O2 -I "$WABT/include" mod.c -o mod.o`, then open `mod.o` in IDA (through the HexRaysSA `ida-mcp` server, see [ida-pro.md](../04-tool-usage/ida-pro.md)) or Ghidra. Function names come out as `w2c_<module>_<name>`. Verified compile with wabt 1.0.42.
+- Ghidra: `nneonneo/ghidra-wasm-plugin` (v2.4.0, Dec 2025) loads `.wasm` directly with decompilation. Install the release zip that matches the Ghidra version.
+- **Toolchain traits** (Go traits verified on a `GOOS=js GOARCH=wasm` build):
+
+| Toolchain | Imports / exports / strings |
+| :--- | :--- |
+| Emscripten | Imports from `env` and `wasi_snapshot_preview1`. Release builds minify to module `a`, names `a`,`b`,... The glue JS maps them (`var wasmImports={b:_emscripten_resize_heap,...}`). Glue has `Module`, `HEAPU8`, `cwrap`, `ccall`, `UTF8ToString`, `stackAlloc`. |
+| Rust + wasm-bindgen | Imports `__wbg_<name>_<hash>`, `__wbindgen_throw`; exports `__wbindgen_malloc`, `__wbindgen_realloc`; panic paths `/rustc/<hash>/library/...` and `src/*.rs` in data. |
+| Go (`GOOS=js`) | 19 imports from module `gojs` (`runtime.wasmWrite`, `syscall/js.valueGet`, ...). Exports `run`, `resume`, `getsp`, `mem`. Custom section `go:buildid`. Glue `wasm_exec.js`. Large (2 MB for hello world). |
+| AssemblyScript | Import `env.abort`; `~lib/` strings in data. |
+| Plain clang `--target=wasm32` | Exports `memory`, `__stack_pointer` global, `.rodata` data segment at 65536 (current wasm-ld places the stack first). Emscripten's default `GLOBAL_BASE` is 1024. |
+
+- **Boundary first.** Read the JS that calls `WebAssembly.instantiate`. Strings cross as `(ptr, len)` in linear memory: JS calls an exported `malloc`, writes bytes into `memory.buffer`, then calls the export. Name exports from their JS call sites before reading any function body.
+- **Addresses.** A `i32.const 65536` followed by a load is a pointer into a data segment. Match it against `wasm-objdump -x -j Data` init offsets to read the string.
+- **Crypto.** Look for constant tables in data (AES S-box `63 7c 77 7b`, SHA-256 `0x428a2f98`) and `i32.rotl` chains. Confirm by calling the export with a known vector in the lab.
+
+## Pitfalls
+- A deobfuscated file is evidence only after it runs (lab) or after a spot check of three decoded strings against a runtime value.
+- `path.evaluate()` treats unknown globals as non-confident. Folding stops at `window.x`; that is correct.
+- Bracket-to-dot conversion must use `t.isValidIdentifier`; reserved words stay bracketed.
+- Do not rename across modules with text search. `a`, `e`, `t` repeat in every scope.
+- Do not trust a module ID across builds. Webpack IDs change between releases; match modules by string constants.
+- A Vite/Rollup bundle has no module map to recover. Split by the `import`/`export` boundaries of chunk files instead.
+- WASM has no types beyond `i32/i64/f32/f64`. Struct layout comes from load offsets, not from the binary.
+- Do not run unknown bundles in host Node. Malware checks `process.versions.node` and uses `require('child_process')` when it finds it.
