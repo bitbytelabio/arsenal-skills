@@ -1,0 +1,200 @@
+---
+- name: Provision macOS VM for Reverse Engineering, Telemetry, and Mach-O Analysis
+  hosts: macos_vms
+  gather_facts: true
+  become: false
+
+  vars:
+    tools_catalog_file: "{{ playbook_dir }}/macos_tools.json"
+    tools_catalog: "{{ lookup('file', tools_catalog_file) | from_json }}"
+    ida_remote_port: 23946
+    mcp_server_port: 4517
+    ida_staging_dir: "/opt/ida_dbgsrv"
+    ida_dbgsrv_src: "{{ ida_dbgsrv_src | default('') }}"
+    homebrew_arm64_bin: "/opt/homebrew/bin/brew"
+    homebrew_x86_bin: "/usr/local/bin/brew"
+    brew_env_path: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+  environment:
+    PATH: "{{ brew_env_path }}"
+
+  tasks:
+    - name: Display macOS system facts
+      ansible.builtin.debug:
+        msg: "Connected to {{ ansible_facts['nodename'] }} (macOS {{ ansible_facts['os_version'] }} {{ ansible_facts['architecture'] }})"
+
+    # 1. Stage IDA Pro remote debug directory
+    - name: Ensure IDA remote debug staging directory exists
+      become: true
+      ansible.builtin.file:
+        path: "{{ ida_staging_dir }}"
+        state: directory
+        mode: "0755"
+        owner: "{{ ansible_user | default(ansible_env.USER) }}"
+
+    - name: Choose the IDA macOS debug server for this architecture
+      ansible.builtin.set_fact:
+        ida_mac_server: "{{ 'mac_server_arm' if ansible_facts['architecture'] in ['arm64', 'aarch64'] else 'mac_server' }}"
+
+    - name: Copy IDA macOS remote debug server from the controller
+      become: true
+      ansible.builtin.copy:
+        src: "{{ ida_dbgsrv_src }}/{{ ida_mac_server }}"
+        dest: "{{ ida_staging_dir }}/{{ ida_mac_server }}"
+        mode: "0755"
+        owner: "{{ ansible_user | default(ansible_env.USER) }}"
+      when: ida_dbgsrv_src | length > 0
+      failed_when: false
+
+    # 2. Configure macOS Packet Filter (PF) firewall for IDA & MCP ports via dedicated anchor
+    - name: Ensure Packet Filter rules anchor directory exists
+      become: true
+      ansible.builtin.file:
+        path: "/etc/pf.anchors"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: wheel
+
+    - name: Deploy PF anchor rules for IDA debug server and Computer Use MCP
+      become: true
+      ansible.builtin.copy:
+        dest: "/etc/pf.anchors/com.re.tools"
+        content: |
+          pass in proto tcp from any to any port {{ ida_remote_port }}
+          pass in proto tcp from any to any port {{ mcp_server_port }}
+        mode: "0644"
+        owner: root
+        group: wheel
+      ignore_errors: true
+
+    - name: Ensure com.re.tools anchor is referenced in /etc/pf.conf
+      become: true
+      ansible.builtin.lineinfile:
+        path: "/etc/pf.conf"
+        line: 'anchor "com.re.tools"'
+        insertafter: '^#?anchor'
+        state: present
+      ignore_errors: true
+
+    - name: Ensure com.re.tools anchor rules are loaded in /etc/pf.conf
+      become: true
+      ansible.builtin.lineinfile:
+        path: "/etc/pf.conf"
+        line: 'load anchor "com.re.tools" from "/etc/pf.anchors/com.re.tools"'
+        insertafter: '^#?load anchor'
+        state: present
+      ignore_errors: true
+
+    - name: Load PF anchor rules specifically without clearing other rules
+      become: true
+      ansible.builtin.command: pfctl -a com.re.tools -f /etc/pf.anchors/com.re.tools
+      ignore_errors: true
+
+    # 3. Verify / Bootstrap Homebrew
+    - name: Check if Homebrew is installed
+      ansible.builtin.stat:
+        path: "{{ homebrew_arm64_bin if ansible_facts['architecture'] == 'arm64' else homebrew_x86_bin }}"
+      register: brew_stat
+
+    - name: Install Homebrew non-interactively if missing
+      ansible.builtin.shell: |
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      when: not brew_stat.stat.exists
+      ignore_errors: true
+
+    - name: Ensure Homebrew environment is in user shell profile
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_env.HOME }}/.zprofile"
+        line: 'eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"'
+        create: true
+        mode: "0644"
+
+    # 4. Tap required third-party repositories
+    - name: Tap excitedplus1s/repo for jtool2 if enabled
+      community.general.homebrew_tap:
+        name: excitedplus1s/repo
+        state: present
+      when: "'excitedplus1s/repo/jtool2' in (tools_catalog.tools | selectattr('enabled', 'equalto', true) | map(attribute='brew_formula') | list)"
+      ignore_errors: true
+
+    - name: Tap blacktop/tap for ipsw if enabled
+      community.general.homebrew_tap:
+        name: blacktop/tap
+        state: present
+      when: "'blacktop/tap/ipsw' in (tools_catalog.tools | selectattr('enabled', 'equalto', true) | map(attribute='brew_formula') | list)"
+      ignore_errors: true
+
+    # 5. Install Homebrew Formulae
+    - name: Filter enabled tools with Homebrew formulae
+      ansible.builtin.set_fact:
+        brew_formulae: >-
+          {{
+            tools_catalog.tools
+            | selectattr('enabled', 'defined')
+            | selectattr('enabled', 'equalto', true)
+            | selectattr('brew_formula', 'defined')
+            | rejectattr('brew_formula', 'none')
+            | rejectattr('brew_formula', 'equalto', '')
+            | map(attribute='brew_formula')
+            | list
+          }}
+
+    - name: Install Homebrew formulae
+      community.general.homebrew:
+        name: "{{ brew_formulae }}"
+        state: present
+        update_homebrew: false
+      when:
+        - brew_formulae is defined
+        - (brew_formulae | length) > 0
+      ignore_errors: true
+
+    # 6. Install Homebrew Casks
+    - name: Filter enabled tools with Homebrew casks
+      ansible.builtin.set_fact:
+        brew_casks: >-
+          {{
+            tools_catalog.tools
+            | selectattr('enabled', 'defined')
+            | selectattr('enabled', 'equalto', true)
+            | selectattr('brew_cask', 'defined')
+            | rejectattr('brew_cask', 'none')
+            | rejectattr('brew_cask', 'equalto', '')
+            | map(attribute='brew_cask')
+            | list
+          }}
+
+    - name: Install Homebrew casks
+      community.general.homebrew_cask:
+        name: "{{ brew_casks }}"
+        state: present
+        accept_external_apps: true
+      when:
+        - brew_casks is defined
+        - (brew_casks | length) > 0
+      ignore_errors: true
+
+    # 7. Configure osquery on macOS
+    - name: Stage minimal osquery.conf on macOS if directory exists
+      become: true
+      ansible.builtin.copy:
+        dest: "/var/osquery/osquery.conf"
+        content: |
+          {
+            "options": {
+              "config_plugin": "filesystem",
+              "logger_plugin": "filesystem",
+              "logger_path": "/var/log/osquery",
+              "schedule_splay_percent": 10
+            },
+            "schedule": {
+              "system_info": {
+                "query": "SELECT hostname, cpu_brand, physical_memory FROM system_info;",
+                "interval": 3600
+              }
+            }
+          }
+        mode: "0644"
+        force: false
+      ignore_errors: true

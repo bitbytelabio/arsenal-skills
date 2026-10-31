@@ -1,0 +1,266 @@
+---
+- name: Provision Linux VM for Reverse Engineering, Telemetry, and Dynamic Analysis
+  hosts: linux_vms
+  gather_facts: true
+  become: false
+
+  vars:
+    tools_catalog_file: "{{ playbook_dir }}/linux_tools.json"
+    tools_catalog: "{{ lookup('file', tools_catalog_file) | from_json }}"
+    ida_remote_port: 23946
+    mcp_server_port: 4517
+    ida_staging_dir: "/opt/ida_dbgsrv"
+    ida_dbgsrv_src: "{{ ida_dbgsrv_src | default('') }}"
+    osquery_config_dir: "/etc/osquery"
+
+  tasks:
+    - name: Display Linux distribution and architecture facts
+      ansible.builtin.debug:
+        msg: "Connected to {{ ansible_facts['nodename'] }} ({{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} {{ ansible_facts['architecture'] }})"
+
+    # 1. System & Kernel Hardening for Debugging (ptrace)
+    - name: Configure kernel.yama.ptrace_scope = 0 for gdb / strace attachment
+      become: true
+      ansible.posix.sysctl:
+        name: kernel.yama.ptrace_scope
+        value: "0"
+        state: present
+        reload: true
+        sysctl_set: true
+      ignore_errors: true
+
+    # 2. Stage directories
+    - name: Ensure IDA remote debug staging directory exists
+      become: true
+      ansible.builtin.file:
+        path: "{{ ida_staging_dir }}"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Choose the IDA Linux debug server for this architecture
+      ansible.builtin.set_fact:
+        ida_linux_servers: "{{ ['armlinux_server', 'armlinux_server32'] if ansible_facts['architecture'] in ['aarch64', 'arm64'] else ['linux_server', 'linux_server32'] }}"
+
+    - name: Copy IDA Linux remote debug servers from the controller
+      become: true
+      ansible.builtin.copy:
+        src: "{{ ida_dbgsrv_src }}/{{ item }}"
+        dest: "{{ ida_staging_dir }}/{{ item }}"
+        mode: "0755"
+      loop: "{{ ida_linux_servers }}"
+      when: ida_dbgsrv_src | length > 0
+      failed_when: false
+
+    - name: Ensure osquery configuration directory exists
+      become: true
+      ansible.builtin.file:
+        path: "{{ osquery_config_dir }}"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+
+    # 3. Firewall Configuration (UFW or Firewalld)
+    - name: Open IDA Remote Debug port (23946/tcp) in UFW
+      become: true
+      community.general.ufw:
+        rule: allow
+        port: "{{ ida_remote_port | string }}"
+        proto: tcp
+      when: ansible_facts['os_family'] == "Debian"
+      ignore_errors: true
+
+    - name: Open Computer Use MCP port (4517/tcp) in UFW
+      become: true
+      community.general.ufw:
+        rule: allow
+        port: "{{ mcp_server_port | string }}"
+        proto: tcp
+      when: ansible_facts['os_family'] == "Debian"
+      ignore_errors: true
+
+    - name: Open ports in Firewalld (RedHat / Fedora)
+      become: true
+      ansible.posix.firewalld:
+        port: "{{ item }}/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+      loop:
+        - "{{ ida_remote_port }}"
+        - "{{ mcp_server_port }}"
+      when: ansible_facts['os_family'] == "RedHat"
+      ignore_errors: true
+
+    # 4. Package Installation: APT (Debian / Ubuntu)
+    - name: Filter enabled tools with APT package definitions
+      ansible.builtin.set_fact:
+        apt_packages: >-
+          {{
+            tools_catalog.tools
+            | selectattr('enabled', 'defined')
+            | selectattr('enabled', 'equalto', true)
+            | selectattr('apt_package', 'defined')
+            | rejectattr('apt_package', 'none')
+            | rejectattr('apt_package', 'equalto', '')
+            | map(attribute='apt_package')
+            | list
+          }}
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Update apt cache and install APT packages
+      become: true
+      ansible.builtin.apt:
+        name: "{{ apt_packages }}"
+        state: present
+        update_cache: true
+      when:
+        - ansible_facts['os_family'] == "Debian"
+        - apt_packages is defined
+        - (apt_packages | length) > 0
+
+    # 5. Package Installation: DNF / YUM (Fedora / RHEL / CentOS)
+    - name: Filter enabled tools with DNF package definitions
+      ansible.builtin.set_fact:
+        dnf_packages: >-
+          {{
+            tools_catalog.tools
+            | selectattr('enabled', 'defined')
+            | selectattr('enabled', 'equalto', true)
+            | selectattr('dnf_package', 'defined')
+            | rejectattr('dnf_package', 'none')
+            | rejectattr('dnf_package', 'equalto', '')
+            | map(attribute='dnf_package')
+            | list
+          }}
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Install DNF packages
+      become: true
+      ansible.builtin.dnf:
+        name: "{{ dnf_packages }}"
+        state: present
+      when:
+        - ansible_facts['os_family'] == "RedHat"
+        - dnf_packages is defined
+        - (dnf_packages | length) > 0
+
+    # 6. Package Installation: Pacman (Arch Linux)
+    - name: Filter enabled tools with Pacman package definitions
+      ansible.builtin.set_fact:
+        pacman_packages: >-
+          {{
+            tools_catalog.tools
+            | selectattr('enabled', 'defined')
+            | selectattr('enabled', 'equalto', true)
+            | selectattr('pacman_package', 'defined')
+            | rejectattr('pacman_package', 'none')
+            | rejectattr('pacman_package', 'equalto', '')
+            | map(attribute='pacman_package')
+            | list
+          }}
+      when: ansible_facts['os_family'] == "Archlinux"
+
+    - name: Install Pacman packages
+      become: true
+      community.general.pacman:
+        name: "{{ pacman_packages }}"
+        state: present
+        update_cache: true
+      when:
+        - ansible_facts['os_family'] == "Archlinux"
+        - pacman_packages is defined
+        - (pacman_packages | length) > 0
+
+    # 7. Standalone Installers: uv (Fast Python Package Manager)
+    - name: Install uv via Astral official installer if missing
+      ansible.builtin.shell: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+      args:
+        creates: "{{ ansible_env.HOME }}/.local/bin/uv"
+      ignore_errors: true
+
+    - name: Symlink uv to /usr/local/bin for all users
+      become: true
+      ansible.builtin.file:
+        src: "{{ ansible_env.HOME }}/.local/bin/uv"
+        dest: "/usr/local/bin/uv"
+        state: link
+      when: "(tools_catalog.tools | selectattr('id', 'equalto', 'uv') | selectattr('enabled', 'equalto', true) | list | length) > 0"
+      ignore_errors: true
+
+    # 8. osquery Repository Setup & Installation (Debian/Ubuntu/RHEL)
+    - name: Add osquery official repository GPG key on Debian/Ubuntu
+      become: true
+      ansible.builtin.get_url:
+        url: https://pkg.osquery.io/deb/pubkey.gpg
+        dest: /etc/apt/trusted.gpg.d/osquery.gpg
+        mode: "0644"
+      when:
+        - ansible_facts['os_family'] == "Debian"
+        - "(tools_catalog.tools | selectattr('id', 'equalto', 'osquery') | selectattr('enabled', 'equalto', true) | list | length) > 0"
+      ignore_errors: true
+
+    - name: Add osquery official APT repository
+      become: true
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}] https://pkg.osquery.io/deb deb main"
+        state: present
+        filename: osquery
+      when:
+        - ansible_facts['os_family'] == "Debian"
+        - "(tools_catalog.tools | selectattr('id', 'equalto', 'osquery') | selectattr('enabled', 'equalto', true) | list | length) > 0"
+      ignore_errors: true
+
+    - name: Install osquery via APT
+      become: true
+      ansible.builtin.apt:
+        name: osquery
+        state: present
+        update_cache: true
+      when:
+        - ansible_facts['os_family'] == "Debian"
+        - "(tools_catalog.tools | selectattr('id', 'equalto', 'osquery') | selectattr('enabled', 'equalto', true) | list | length) > 0"
+      ignore_errors: true
+
+    # 9. Computer Use MCP Server Installation (@zavora-ai/computer-use-mcp)
+    - name: Install Computer Use MCP server via npm if Node.js/npm is available
+      become: true
+      ansible.builtin.shell: |
+        npm install -g @zavora-ai/computer-use-mcp
+      when: "(tools_catalog.tools | selectattr('id', 'equalto', 'computer-use-mcp') | selectattr('enabled', 'equalto', true) | list | length) > 0"
+      ignore_errors: true
+
+    # 10. Configure and Enable Services
+    - name: Deploy minimal osquery.conf if missing
+      become: true
+      ansible.builtin.copy:
+        dest: "{{ osquery_config_dir }}/osquery.conf"
+        content: |
+          {
+            "options": {
+              "config_plugin": "filesystem",
+              "logger_plugin": "filesystem",
+              "logger_path": "/var/log/osquery",
+              "schedule_splay_percent": 10
+            },
+            "schedule": {
+              "system_info": {
+                "query": "SELECT hostname, cpu_brand, physical_memory FROM system_info;",
+                "interval": 3600
+              }
+            }
+          }
+        mode: "0644"
+        force: false
+      ignore_errors: true
+
+    - name: Enable osqueryd service
+      become: true
+      ansible.builtin.service:
+        name: osqueryd
+        enabled: true
+        state: started
+      ignore_errors: true

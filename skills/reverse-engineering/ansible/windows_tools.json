@@ -1,0 +1,502 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WindowsToolsCatalog",
+  "description": "Structured catalog of reverse engineering, malware analysis, forensic triage, and monitoring tools for Windows VMs.",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "id": "osquery",
+      "name": "osquery",
+      "category": "telemetry_monitoring",
+      "description": "SQL-powered operating system instrumentation, monitoring, and analytics agent.",
+      "choco_package": "osquery",
+      "winget_id": "Facebook.osquery",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\osquery\\osqueryi.exe",
+      "service_name": "osqueryd",
+      "enabled": true,
+      "tags": [
+        "telemetry",
+        "monitoring",
+        "sql",
+        "auditing",
+        "endpoint"
+      ]
+    },
+    {
+      "id": "sysmon",
+      "name": "Sysmon",
+      "category": "telemetry_monitoring",
+      "description": "System Monitor for logging process creations, network connections, file changes, and driver loads to Windows Event Log.",
+      "choco_package": "sysmon",
+      "winget_id": "Microsoft.Sysinternals.Sysmon",
+      "npm_package": null,
+      "binary_path": "C:\\Windows\\Sysmon64.exe",
+      "service_name": "Sysmon64",
+      "enabled": true,
+      "tags": [
+        "telemetry",
+        "sysinternals",
+        "eventlog",
+        "hunting",
+        "monitoring"
+      ]
+    },
+    {
+      "id": "tshark",
+      "name": "Wireshark & TShark",
+      "category": "network_analysis",
+      "description": "Network packet analyzer and command-line packet capture tool with Npcap driver.",
+      "choco_package": "wireshark",
+      "winget_id": "WiresharkFoundation.Wireshark",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\Wireshark\\tshark.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "network",
+        "pcap",
+        "packets",
+        "sniffer",
+        "tshark",
+        "wireshark"
+      ]
+    },
+    {
+      "id": "fiddler",
+      "name": "Fiddler Classic",
+      "category": "network_analysis",
+      "description": "HTTP and HTTPS debugging proxy and web session inspection tool.",
+      "choco_package": "fiddler",
+      "winget_id": "Telerik.Fiddler.Classic",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files (x86)\\Fiddler\\Fiddler.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "network",
+        "proxy",
+        "http",
+        "https",
+        "web"
+      ]
+    },
+    {
+      "id": "mitmproxy",
+      "name": "mitmproxy",
+      "category": "network_analysis",
+      "description": "Interactive TLS-capable intercepting HTTP/HTTPS proxy and packet inspection tool.",
+      "choco_package": "mitmproxy",
+      "winget_id": "Mitmproxy.Mitmproxy",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\mitmproxy\\bin\\mitmdump.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "network",
+        "proxy",
+        "tls",
+        "interception",
+        "mitmdump"
+      ]
+    },
+    {
+      "id": "sysinternals",
+      "name": "Sysinternals Suite",
+      "category": "forensics_triage",
+      "description": "Comprehensive suite of Windows system utilities including Procmon, Procexp, Autoruns, TCPView, and strings.",
+      "choco_package": "sysinternals",
+      "winget_id": "Microsoft.Sysinternals",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\procexp.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "forensics",
+        "triage",
+        "sysinternals",
+        "procexp",
+        "procmon",
+        "autoruns",
+        "tcpview"
+      ]
+    },
+    {
+      "id": "autoruns",
+      "name": "Autoruns",
+      "category": "forensics_triage",
+      "description": "Comprehensive autostart location viewer and persistence detection utility.",
+      "choco_package": "autoruns",
+      "winget_id": "Microsoft.Sysinternals.Autoruns",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\autorunsc.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "forensics",
+        "persistence",
+        "autostart",
+        "sysinternals"
+      ]
+    },
+    {
+      "id": "procmon",
+      "name": "Process Monitor",
+      "category": "forensics_triage",
+      "description": "Advanced real-time file system, Registry, and process/thread activity monitoring tool.",
+      "choco_package": "procmon",
+      "winget_id": "Microsoft.Sysinternals.ProcessMonitor",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\Procmon.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "forensics",
+        "procmon",
+        "registry",
+        "filesystem",
+        "tracing"
+      ]
+    },
+    {
+      "id": "procdot",
+      "name": "ProcDOT",
+      "category": "forensics_triage",
+      "description": "Visual analysis tool for Procmon and PCAP logs. No current Chocolatey or winget package; copy the zip from procdot.com into C:\\Tools.",
+      "choco_package": null,
+      "winget_id": null,
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\ProcDOT.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "forensics",
+        "visualization",
+        "procmon",
+        "graph",
+        "malware"
+      ]
+    },
+    {
+      "id": "x64dbg",
+      "name": "x64dbg",
+      "category": "debugging_disassembly",
+      "description": "Open-source x64/x32 user-mode debugger for Windows with assembly view, memory dump, and script engine.",
+      "choco_package": "x64dbg.portable",
+      "winget_id": "x64dbg.x64dbg",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\lib\\x64dbg.portable\\tools\\release\\x64\\x64dbg.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "debugging",
+        "disassembly",
+        "x64dbg",
+        "user-mode",
+        "re"
+      ]
+    },
+    {
+      "id": "ghidra",
+      "name": "Ghidra",
+      "category": "debugging_disassembly",
+      "description": "NSA software reverse engineering framework with decompiler, disassembly, and scripting.",
+      "choco_package": "ghidra",
+      "winget_id": "NSA.Ghidra",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\ghidraRun.bat",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "decompiler",
+        "disassembly",
+        "ghidra",
+        "static-analysis",
+        "re"
+      ]
+    },
+    {
+      "id": "cutter",
+      "name": "Cutter",
+      "category": "debugging_disassembly",
+      "description": "Free and open-source reverse engineering platform powered by Rizin / Radare2 with Ghidra decompiler plugin.",
+      "choco_package": "cutter",
+      "winget_id": "Rizin.Cutter",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\Cutter\\Cutter.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "decompiler",
+        "disassembly",
+        "cutter",
+        "rizin",
+        "radare2",
+        "gui"
+      ]
+    },
+    {
+      "id": "radare2",
+      "name": "radare2",
+      "category": "debugging_disassembly",
+      "description": "UNIX-like commandline reverse engineering framework and binary analysis tool suite.",
+      "choco_package": "radare2",
+      "winget_id": "radare2.radare2",
+      "npm_package": null,
+      "binary_path": "C:\\radare2\\bin\\radare2.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "disassembly",
+        "radare2",
+        "cli",
+        "hex",
+        "re"
+      ]
+    },
+    {
+      "id": "windbg",
+      "name": "WinDbg",
+      "category": "debugging_disassembly",
+      "description": "Microsoft Windows Debugger for user-mode and kernel-mode debugging.",
+      "choco_package": null,
+      "winget_id": "Microsoft.WinDbg",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\WindowsApps\\WinDbgX.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "debugging",
+        "windbg",
+        "kernel",
+        "user-mode",
+        "microsoft"
+      ]
+    },
+    {
+      "id": "ida_dbgsrv",
+      "name": "IDA Remote Debugging Server",
+      "category": "debugging_disassembly",
+      "description": "Firewall configuration and directory staging for IDA Pro win64_remote.exe / win32_remote32.exe debug servers.",
+      "choco_package": null,
+      "winget_id": null,
+      "npm_package": null,
+      "binary_path": "C:\\Tools\\ida_dbgsrv\\win64_remote.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "debugging",
+        "ida",
+        "dbgsrv",
+        "remote-debugging",
+        "firewall"
+      ]
+    },
+    {
+      "id": "die",
+      "name": "Detect It Easy (DIE)",
+      "category": "pe_analysis",
+      "description": "Program for determining types of files, packers, compilers, and cryptographic signatures.",
+      "choco_package": "die",
+      "winget_id": "horsicq.DetectItEasy",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\die.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "pe",
+        "packer",
+        "entropy",
+        "signatures",
+        "compiler-detect"
+      ]
+    },
+    {
+      "id": "pestudio",
+      "name": "PeStudio",
+      "category": "pe_analysis",
+      "description": "Initial malware triage tool to inspect executables, hashes, imports, indicators, and anomalies.",
+      "choco_package": "pestudio",
+      "winget_id": "MarcOchsenmeier.pestudio",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\pestudio.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "pe",
+        "triage",
+        "imports",
+        "anomalies",
+        "indicators"
+      ]
+    },
+    {
+      "id": "pe-bear",
+      "name": "PE-bear",
+      "category": "pe_analysis",
+      "description": "Reversing tool for PE files with visual section layout, headers, imports/exports, and relocations viewer.",
+      "choco_package": "pebear",
+      "winget_id": "Hasherezade.PE-bear",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\lib\\pebear\\tools\\PE-bear.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "pe",
+        "sections",
+        "headers",
+        "relocations",
+        "re"
+      ]
+    },
+    {
+      "id": "yara",
+      "name": "YARA",
+      "category": "pe_analysis",
+      "description": "Pattern matching swiss army knife for malware researchers to identify and classify malware samples.",
+      "choco_package": "yara",
+      "winget_id": "VirusTotal.YARA",
+      "npm_package": null,
+      "binary_path": "C:\\ProgramData\\chocolatey\\bin\\yara64.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "signatures",
+        "rules",
+        "pattern-matching",
+        "yara",
+        "malware"
+      ]
+    },
+    {
+      "id": "7zip",
+      "name": "7-Zip",
+      "category": "system_utilities",
+      "description": "High-compression file archiver supporting 7z, ZIP, RAR, CAB, ISO, and TAR formats.",
+      "choco_package": "7zip",
+      "winget_id": "7zip.7zip",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\7-Zip\\7z.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "utilities",
+        "compression",
+        "archive",
+        "7zip"
+      ]
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "category": "system_utilities",
+      "description": "Distributed version control system and Git Bash shell environment.",
+      "choco_package": "git",
+      "winget_id": "Git.Git",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\Git\\bin\\git.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "utilities",
+        "git",
+        "vcs",
+        "bash"
+      ]
+    },
+    {
+      "id": "python3",
+      "name": "Python 3",
+      "category": "system_utilities",
+      "description": "Python 3 interpreter and pip environment for scripting and reverse engineering automation.",
+      "choco_package": "python312",
+      "winget_id": "Python.Python.3.12",
+      "npm_package": null,
+      "binary_path": "C:\\Python312\\python.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "utilities",
+        "python",
+        "scripting",
+        "automation"
+      ]
+    },
+    {
+      "id": "hxd",
+      "name": "HxD Hex Editor",
+      "category": "system_utilities",
+      "description": "Fast and lightweight hex editor, disk editor, and RAM editor.",
+      "choco_package": "hxd",
+      "winget_id": "MH-Nexus.HxD",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\HxD\\HxD.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "utilities",
+        "hex",
+        "editor",
+        "raw",
+        "memory"
+      ]
+    },
+    {
+      "id": "curl",
+      "name": "cURL",
+      "category": "system_utilities",
+      "description": "Command-line tool for transferring data with URL syntax.",
+      "choco_package": "curl",
+      "winget_id": "cURL.cURL",
+      "npm_package": null,
+      "binary_path": "C:\\Windows\\System32\\curl.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "utilities",
+        "network",
+        "curl",
+        "download"
+      ]
+    },
+    {
+      "id": "nodejs",
+      "name": "Node.js LTS",
+      "category": "system_utilities",
+      "description": "Node.js JavaScript runtime environment (LTS) including npm package manager.",
+      "choco_package": "nodejs-lts",
+      "winget_id": "OpenJS.NodeJS.LTS",
+      "npm_package": null,
+      "binary_path": "C:\\Program Files\\nodejs\\node.exe",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "utilities",
+        "javascript",
+        "nodejs",
+        "npm",
+        "runtime"
+      ]
+    },
+    {
+      "id": "computer-use-mcp",
+      "name": "Computer Use MCP (Zavora AI)",
+      "category": "automation_agent",
+      "description": "High-performance Model Context Protocol (MCP) server for Windows desktop automation: screenshot, mouse, keyboard, clipboard, and window management via native Rust NAPI.",
+      "choco_package": null,
+      "winget_id": null,
+      "npm_package": "@zavora-ai/computer-use-mcp",
+      "binary_path": "%APPDATA%\\npm\\computer-use-mcp.cmd",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "mcp",
+        "automation",
+        "computer-use",
+        "agent",
+        "desktop-control",
+        "zavora"
+      ]
+    }
+  ]
+}

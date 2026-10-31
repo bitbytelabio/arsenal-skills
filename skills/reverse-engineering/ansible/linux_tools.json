@@ -1,0 +1,353 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LinuxToolsCatalog",
+  "description": "Structured catalog of reverse engineering, telemetry, debugging, and forensic triage tools for Linux VMs.",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "id": "osquery",
+      "name": "osquery",
+      "category": "telemetry_monitoring",
+      "description": "SQL-powered operating system instrumentation, monitoring, and analytics agent.",
+      "apt_package": null,
+      "dnf_package": null,
+      "pacman_package": null,
+      "binary_path": "/usr/bin/osqueryi",
+      "service_name": "osqueryd",
+      "enabled": true,
+      "tags": [
+        "telemetry",
+        "monitoring",
+        "sql",
+        "auditing",
+        "endpoint"
+      ]
+    },
+    {
+      "id": "tshark",
+      "name": "Wireshark CLI (tshark)",
+      "category": "network_analysis",
+      "description": "Command-line network packet analyzer and capture engine.",
+      "apt_package": "tshark",
+      "dnf_package": "wireshark-cli",
+      "pacman_package": "wireshark-cli",
+      "binary_path": "/usr/bin/tshark",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "network",
+        "pcap",
+        "packets",
+        "sniffer",
+        "tshark"
+      ]
+    },
+    {
+      "id": "tcpdump",
+      "name": "tcpdump",
+      "category": "network_analysis",
+      "description": "Standard command-line packet analyzer and packet capture utility.",
+      "apt_package": "tcpdump",
+      "dnf_package": "tcpdump",
+      "pacman_package": "tcpdump",
+      "binary_path": "/usr/sbin/tcpdump",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "network",
+        "pcap",
+        "capture",
+        "traffic"
+      ]
+    },
+    {
+      "id": "gdb",
+      "name": "GNU Debugger (gdb)",
+      "category": "debugging_disassembly",
+      "description": "The GNU Project debugger for native binary analysis and memory inspection.",
+      "apt_package": "gdb",
+      "dnf_package": "gdb",
+      "pacman_package": "gdb",
+      "binary_path": "/usr/bin/gdb",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "debugger",
+        "gdb",
+        "dynamic_analysis",
+        "native"
+      ]
+    },
+    {
+      "id": "radare2",
+      "name": "radare2",
+      "category": "debugging_disassembly",
+      "description": "Advanced command-line hexadecimal editor, disassembler, and reverse engineering framework.",
+      "apt_package": "radare2",
+      "dnf_package": "radare2",
+      "pacman_package": "radare2",
+      "binary_path": "/usr/bin/r2",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "disassembler",
+        "debugger",
+        "hex",
+        "reverse_engineering",
+        "r2"
+      ]
+    },
+    {
+      "id": "ghidra",
+      "name": "NSA Ghidra",
+      "category": "debugging_disassembly",
+      "description": "Comprehensive software reverse engineering suite with decompiler and headless analyzer.",
+      "apt_package": null,
+      "dnf_package": null,
+      "pacman_package": null,
+      "binary_path": "/opt/ghidra/ghidraRun",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "decompiler",
+        "disassembler",
+        "ghidra",
+        "sre"
+      ]
+    },
+    {
+      "id": "strace",
+      "name": "strace",
+      "category": "debugging_disassembly",
+      "description": "Diagnostic, debugging, and instructional userspace tracer for system calls and signals.",
+      "apt_package": "strace",
+      "dnf_package": "strace",
+      "pacman_package": "strace",
+      "binary_path": "/usr/bin/strace",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "tracer",
+        "syscalls",
+        "debugging",
+        "dynamic_analysis"
+      ]
+    },
+    {
+      "id": "ltrace",
+      "name": "ltrace",
+      "category": "debugging_disassembly",
+      "description": "Dynamic library call interception and execution tracer for Linux programs.",
+      "apt_package": "ltrace",
+      "dnf_package": "ltrace",
+      "pacman_package": "ltrace",
+      "binary_path": "/usr/bin/ltrace",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "tracer",
+        "library",
+        "dynamic_analysis"
+      ]
+    },
+    {
+      "id": "binwalk",
+      "name": "binwalk",
+      "category": "forensics_triage",
+      "description": "Firmware analysis tool for searching binary images for embedded files and executable code.",
+      "apt_package": "binwalk",
+      "dnf_package": "binwalk",
+      "pacman_package": "binwalk",
+      "binary_path": "/usr/bin/binwalk",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "firmware",
+        "forensics",
+        "extraction",
+        "binwalk"
+      ]
+    },
+    {
+      "id": "yara",
+      "name": "YARA",
+      "category": "forensics_triage",
+      "description": "Pattern matching swiss army knife for malware researchers to identify and classify malware samples.",
+      "apt_package": "yara",
+      "dnf_package": "yara",
+      "pacman_package": "yara",
+      "binary_path": "/usr/bin/yara",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "signatures",
+        "rules",
+        "malware",
+        "classification",
+        "yara"
+      ]
+    },
+    {
+      "id": "checksec",
+      "name": "checksec",
+      "category": "debugging_disassembly",
+      "description": "Shell utility to check binary hardening properties (PIE, RELRO, Canaries, ASLR, Fortify).",
+      "apt_package": "checksec",
+      "dnf_package": "checksec",
+      "pacman_package": "checksec",
+      "binary_path": "/usr/bin/checksec",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "hardening",
+        "elf",
+        "security",
+        "mitigations"
+      ]
+    },
+    {
+      "id": "upx",
+      "name": "UPX (Ultimate Packer for eXecutables)",
+      "category": "debugging_disassembly",
+      "description": "High-performance executable packer and unpacker for various binary formats.",
+      "apt_package": "upx-ucl",
+      "dnf_package": "upx",
+      "pacman_package": "upx",
+      "binary_path": "/usr/bin/upx",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "packer",
+        "unpacker",
+        "compression",
+        "upx"
+      ]
+    },
+    {
+      "id": "python3",
+      "name": "Python 3 Runtime",
+      "category": "system_utilities",
+      "description": "Python 3 programming environment for scripting, automation, and tooling.",
+      "apt_package": "python3",
+      "dnf_package": "python3",
+      "pacman_package": "python",
+      "binary_path": "/usr/bin/python3",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "runtime",
+        "scripting",
+        "python",
+        "automation"
+      ]
+    },
+    {
+      "id": "uv",
+      "name": "uv Python package manager",
+      "category": "system_utilities",
+      "description": "Extremely fast Python package and project manager written in Rust (installed via Astral standalone installer).",
+      "apt_package": null,
+      "dnf_package": null,
+      "pacman_package": null,
+      "binary_path": "/usr/local/bin/uv",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "package_manager",
+        "python",
+        "virtualenv",
+        "uv"
+      ]
+    },
+    {
+      "id": "git",
+      "name": "Git VCS",
+      "category": "system_utilities",
+      "description": "Distributed version control system for source code and repository management.",
+      "apt_package": "git",
+      "dnf_package": "git",
+      "pacman_package": "git",
+      "binary_path": "/usr/bin/git",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "vcs",
+        "git",
+        "repository"
+      ]
+    },
+    {
+      "id": "curl",
+      "name": "cURL",
+      "category": "system_utilities",
+      "description": "Command-line tool and library for transferring data with URLs.",
+      "apt_package": "curl",
+      "dnf_package": "curl",
+      "pacman_package": "curl",
+      "binary_path": "/usr/bin/curl",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "http",
+        "networking",
+        "download",
+        "transfer"
+      ]
+    },
+    {
+      "id": "7zip",
+      "name": "7-Zip / p7zip",
+      "category": "system_utilities",
+      "description": "High-ratio archive manager for unpacking malware payloads, firmware, and triage archives.",
+      "apt_package": "p7zip-full",
+      "dnf_package": "p7zip",
+      "pacman_package": "p7zip",
+      "binary_path": "/usr/bin/7z",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "archive",
+        "decompression",
+        "7z",
+        "zip"
+      ]
+    },
+    {
+      "id": "ida_dbgsrv",
+      "name": "IDA Pro Remote Debug Server (Linux)",
+      "category": "debugging_disassembly",
+      "description": "Staging directory, firewall configuration, and permissions for IDA Pro linux_server and armlinux_server debug servers on port 23946.",
+      "apt_package": null,
+      "dnf_package": null,
+      "pacman_package": null,
+      "binary_path": "/opt/ida_dbgsrv",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "ida",
+        "debugger",
+        "remote_debug",
+        "dbgsrv"
+      ]
+    },
+    {
+      "id": "computer-use-mcp",
+      "name": "Computer Use MCP Server",
+      "category": "automation_agent",
+      "description": "Desktop automation MCP server (@zavora-ai/computer-use-mcp) enabling host AI agents to automate the Linux guest desktop over port 4517.",
+      "apt_package": null,
+      "dnf_package": null,
+      "pacman_package": null,
+      "binary_path": "/usr/local/bin/computer-use-mcp",
+      "service_name": "computer-use-mcp",
+      "enabled": true,
+      "tags": [
+        "mcp",
+        "automation",
+        "desktop",
+        "agent",
+        "port4517"
+      ]
+    }
+  ]
+}

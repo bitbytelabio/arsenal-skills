@@ -1,0 +1,271 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MacOSToolsCatalog",
+  "description": "Structured catalog of reverse engineering, telemetry, binary analysis, and forensic triage tools for macOS VMs.",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "id": "osquery",
+      "name": "osquery",
+      "category": "telemetry_monitoring",
+      "description": "SQL-powered operating system instrumentation, monitoring, and analytics agent.",
+      "brew_formula": null,
+      "brew_cask": "osquery",
+      "binary_path": "/opt/osquery/bin/osqueryi",
+      "service_name": "io.osquery.osqueryd",
+      "enabled": true,
+      "tags": [
+        "telemetry",
+        "monitoring",
+        "sql",
+        "auditing",
+        "endpoint"
+      ]
+    },
+    {
+      "id": "tshark",
+      "name": "Wireshark CLI (tshark)",
+      "category": "network_analysis",
+      "description": "Command-line network packet analyzer and capture engine.",
+      "brew_formula": "wireshark",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/tshark",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "network",
+        "pcap",
+        "packets",
+        "sniffer",
+        "tshark",
+        "wireshark"
+      ]
+    },
+    {
+      "id": "radare2",
+      "name": "radare2",
+      "category": "debugging_disassembly",
+      "description": "Advanced command-line hexadecimal editor, disassembler, and reverse engineering framework.",
+      "brew_formula": "radare2",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/r2",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "disassembler",
+        "debugger",
+        "hex",
+        "reverse_engineering",
+        "r2"
+      ]
+    },
+    {
+      "id": "ghidra",
+      "name": "NSA Ghidra",
+      "category": "debugging_disassembly",
+      "description": "Comprehensive software reverse engineering suite with decompiler and headless analyzer.",
+      "brew_formula": "ghidra",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/ghidraRun",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "decompiler",
+        "disassembler",
+        "ghidra",
+        "sre"
+      ]
+    },
+    {
+      "id": "binwalk",
+      "name": "binwalk",
+      "category": "forensics_triage",
+      "description": "Firmware analysis tool for searching binary images for embedded files and executable code.",
+      "brew_formula": "binwalk",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/binwalk",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "firmware",
+        "forensics",
+        "extraction",
+        "binwalk"
+      ]
+    },
+    {
+      "id": "yara",
+      "name": "YARA",
+      "category": "forensics_triage",
+      "description": "Pattern matching swiss army knife for malware researchers to identify and classify malware samples.",
+      "brew_formula": "yara",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/yara",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "signatures",
+        "rules",
+        "malware",
+        "classification",
+        "yara"
+      ]
+    },
+    {
+      "id": "ipsw",
+      "name": "ipsw",
+      "category": "forensics_triage",
+      "description": "iOS/macOS IPSW / OTA firmware parser, kernelcache extractor, and Mach-O research tool.",
+      "brew_formula": "blacktop/tap/ipsw",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/ipsw",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "ipsw",
+        "macho",
+        "kernelcache",
+        "firmware",
+        "apple"
+      ]
+    },
+    {
+      "id": "jtool2",
+      "name": "jtool2",
+      "category": "debugging_disassembly",
+      "description": "Mach-O disassembler, dyld shared cache extractor, and symbol inspection tool.",
+      "brew_formula": "excitedplus1s/repo/jtool2",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/jtool2",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "macho",
+        "dyld",
+        "disassembler",
+        "symbols",
+        "apple"
+      ]
+    },
+    {
+      "id": "python3",
+      "name": "Python 3 Runtime",
+      "category": "system_utilities",
+      "description": "Python 3 programming environment for scripting, automation, and tooling.",
+      "brew_formula": "python@3.12",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/python3",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "runtime",
+        "scripting",
+        "python",
+        "automation"
+      ]
+    },
+    {
+      "id": "uv",
+      "name": "uv Python package manager",
+      "category": "system_utilities",
+      "description": "Extremely fast Python package and project manager written in Rust.",
+      "brew_formula": "uv",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/uv",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "package_manager",
+        "python",
+        "virtualenv",
+        "uv"
+      ]
+    },
+    {
+      "id": "git",
+      "name": "Git VCS",
+      "category": "system_utilities",
+      "description": "Distributed version control system for source code and repository management.",
+      "brew_formula": "git",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/git",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "vcs",
+        "git",
+        "repository"
+      ]
+    },
+    {
+      "id": "p7zip",
+      "name": "7-Zip (sevenzip)",
+      "category": "system_utilities",
+      "description": "High-ratio archive manager providing 7zz utility for unpacking archives.",
+      "brew_formula": "sevenzip",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/7zz",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "archive",
+        "decompression",
+        "7z",
+        "zip",
+        "sevenzip"
+      ]
+    },
+    {
+      "id": "curl",
+      "name": "cURL",
+      "category": "system_utilities",
+      "description": "Command-line tool and library for transferring data with URLs.",
+      "brew_formula": "curl",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/curl",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "http",
+        "networking",
+        "download",
+        "transfer"
+      ]
+    },
+    {
+      "id": "ida_dbgsrv",
+      "name": "IDA Pro Remote Debug Server (macOS)",
+      "category": "debugging_disassembly",
+      "description": "Staging directory, firewall configuration, and permissions for IDA Pro mac_server / mac_server_arm on port 23946.",
+      "brew_formula": null,
+      "brew_cask": null,
+      "binary_path": "/opt/ida_dbgsrv",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "ida",
+        "debugger",
+        "remote_debug",
+        "dbgsrv"
+      ]
+    },
+    {
+      "id": "computer-use-mcp",
+      "name": "Computer Use MCP Server",
+      "category": "automation_agent",
+      "description": "Desktop automation MCP server (@zavora-ai/computer-use-mcp) enabling host AI agents to automate the macOS guest desktop over port 4517.",
+      "brew_formula": null,
+      "brew_cask": null,
+      "binary_path": "/usr/local/bin/computer-use-mcp",
+      "service_name": "com.zavora.computer-use-mcp",
+      "enabled": true,
+      "tags": [
+        "mcp",
+        "automation",
+        "desktop",
+        "agent",
+        "port4517"
+      ]
+    }
+  ]
+}

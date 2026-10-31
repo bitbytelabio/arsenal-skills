@@ -1,0 +1,49 @@
+---
+- name: Manage Windows Defender State (Toggle / Status / Disable / Enable)
+  hosts: windows_vms
+  gather_facts: false
+
+  vars:
+    defender_action: "status"  # status, disable, enable
+    defender_clear_exclusions: false
+    defender_script_local: "{{ playbook_dir }}/toggle_defender.ps1"
+    defender_script_remote: "C:\\Tools\\toggle_defender.ps1"
+    defender_exclusions:
+      - "C:\\Tools"
+      - "C:\\Workspace"
+  tasks:
+    - name: Validate defender_action parameter
+      ansible.builtin.assert:
+        that:
+          - defender_action in ['status', 'disable', 'enable']
+        fail_msg: "Invalid defender_action '{{ defender_action }}'. Must be 'status', 'disable', or 'enable'."
+
+    - name: Ensure C:\Tools directory exists on Windows target
+      ansible.windows.win_file:
+        path: "C:\\Tools"
+        state: directory
+
+    - name: Copy toggle_defender.ps1 to Windows VM
+      ansible.windows.win_copy:
+        src: "{{ defender_script_local }}"
+        dest: "{{ defender_script_remote }}"
+
+    - name: Execute toggle_defender.ps1 on Windows host
+      ansible.windows.win_powershell:
+        script: |
+          $params = @{
+              Action = "{{ defender_action }}"
+          }
+          $excl = @({% if defender_exclusions | length > 0 %}'{{ defender_exclusions | join("','") }}'{% endif %})
+          if ($excl.Count -gt 0) {
+              $params['ExclusionPaths'] = $excl
+          }
+          if ('{{ defender_clear_exclusions | bool }}' -eq 'True') {
+              $params['ClearExclusions'] = $true
+          }
+          & "{{ defender_script_remote }}" @params
+      register: defender_result
+
+    - name: Display Windows Defender execution output
+      ansible.builtin.debug:
+        var: defender_result.output
