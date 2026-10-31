@@ -27,7 +27,7 @@
 | **Rust Compiled Binaries** | `rea inspect-rust-binary`, `rustfilt` | IDA Pro Rust FLIRT | [01-static-architectures/native-rust.md](01-static-architectures/native-rust.md) |
 | **Managed .NET / CIL Assemblies** | `ilspycmd`, `dnSpy` | `de4dot`, Ghidra | [01-static-architectures/managed-dotnet-jvm.md](01-static-architectures/managed-dotnet-jvm.md) |
 | **Java / Android DEX / APK** | `jadx --deobf`, `apktool` | Smali, `androguard` | [01-static-architectures/android-apk.md](01-static-architectures/android-apk.md) |
-| **Unity IL2CPP Bundles** | `rea inspect-il2cpp-metadata`, Il2CppDumper | IDA Pro with script | [01-static-architectures/unity-il2cpp.md](01-static-architectures/unity-il2cpp.md) |
+| **Unity IL2CPP Bundles** | il2cpp-dumper-rs and Il2CppInspectorRedux via `scripts/il2cpp_tools.py dump` | frida-il2cpp-bridge (`bridge-dump`), Zygisk-Il2CppDumper (`zygisk-build`), `rea inspect-il2cpp-metadata` | [01-static-architectures/unity-il2cpp.md](01-static-architectures/unity-il2cpp.md) |
 | **JavaScript / Electron / WebAssembly** | `jshookmcp` (`@jshookmcp/jshook`), `rea analyze-javascript-application`, `wasm2wat` | `asar`, `webcrack` | [04-tool-usage/jshook-mcp.md](04-tool-usage/jshook-mcp.md) & [01-static-architectures/browser-js-wasm.md](01-static-architectures/browser-js-wasm.md) |
 | **Embedded Firmware / IoT** | `binwalk`, `unblob`, `ripcord` | QEMU user/system, OpenOCD | [01-static-architectures/firmware-iot.md](01-static-architectures/firmware-iot.md) |
 | **Malware Sandboxing & Isolation** | Docker (`--cap-drop=ALL`), UTM/QEMU (`utmctl`) | INetSim, mitmproxy sinkhole | [02-dynamic-instrumentation/malware-sandbox-isolation.md](02-dynamic-instrumentation/malware-sandbox-isolation.md) |

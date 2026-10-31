@@ -144,11 +144,33 @@
 
     - name: Install Homebrew packages
       block:
-        - name: Install Homebrew non-interactively if missing
+        # The install.sh path git-clones Homebrew/brew, which failed on the UTM
+        # guest with repeated "Connection reset by peer". The signed .pkg is one
+        # HTTPS download that curl can retry, so try it first.
+        - name: Install Homebrew from the signed release pkg
+          become: true
           ansible.builtin.shell: |
-            NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            set -e
+            curl -fsSL --retry 6 --retry-all-errors --retry-delay 5 \
+              -o /tmp/Homebrew.pkg https://github.com/Homebrew/brew/releases/latest/download/Homebrew.pkg
+            pkgutil --check-signature /tmp/Homebrew.pkg | grep -q "signed by a developer certificate issued by Apple"
+            installer -pkg /tmp/Homebrew.pkg -target /
+            rm -f /tmp/Homebrew.pkg
           args:
             creates: "{{ brew_bin }}"
+          register: brew_pkg
+          ignore_errors: true
+
+        - name: Fall back to the Homebrew install script
+          ansible.builtin.shell: |
+            NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL --retry 6 --retry-all-errors https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          args:
+            creates: "{{ brew_bin }}"
+          when: brew_pkg is failed
+          register: brew_script
+          retries: 2
+          delay: 30
+          until: brew_script is succeeded
 
         - name: Put Homebrew in the login shell profile
           ansible.builtin.lineinfile:
