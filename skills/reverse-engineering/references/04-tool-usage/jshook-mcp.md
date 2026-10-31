@@ -173,7 +173,7 @@ Direct frame-level interception of encrypted or multiplexed protocols:
 | Tool Name | Scope & Functionality | Research Application |
 | :--- | :--- | :--- |
 | **`http2_frame_builder`** | Parses, reconstructs, and inspects HTTP/2 multiplexed streams, DATA frames, and HEADERS frames. | Bypassing HTTP/1 layer inspection limits |
-| **`get_websocket_messages`** | Captures live bidirectional WebSocket frames (text, binary, ping/pong) with millisecond timestamps. | Real-time gaming, financial tickers, C2 feeds |
+| **`get_websocket_messages`** | Captures live bidirectional WebSocket frames (text, binary, ping/pong) with millisecond timestamps. | Real-time gaming, financial tickers, server-pushed task feeds |
 | **`graphql_inspector`** | Parses GraphQL queries, mutations, subscriptions, and schema introspection endpoints. | Mapping hidden API attack surfaces |
 | **`boringssl-inspector`** | Hooks Chromium BoringSSL functions at the native layer to intercept plaintext TLS traffic before encryption. | Universal TLS interception without CA installation |
 

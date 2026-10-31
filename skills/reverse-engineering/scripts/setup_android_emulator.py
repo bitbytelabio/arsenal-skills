@@ -72,6 +72,9 @@ class CreateAvdResult(TypedDict):
     system_image_package: str
     device: str
     success: bool
+    config_ini: NotRequired[str | None]
+    play_store_enabled: NotRequired[bool]
+    error: NotRequired[str]
 
 
 class ColdBootResult(TypedDict):
@@ -102,6 +105,7 @@ class InstallApkResult(TypedDict):
     serial: str
     success: bool
     output: str
+    launched_package: NotRequired[str | None]
 
 
 class VerifyRootResult(TypedDict):
@@ -110,6 +114,8 @@ class VerifyRootResult(TypedDict):
     uid: int | None
     gid: int | None
     raw_output: str
+    su_path: NotRequired[str | None]
+    hint: NotRequired[str]
 
 
 def find_sdk_root() -> Path | None:
@@ -197,6 +203,56 @@ def list_system_images(sdk_root: Path | None) -> list[SystemImageInfo]:
     return results
 
 
+def avd_home_candidates() -> list[Path]:
+    """Directories where the emulator may keep AVDs, most specific first.
+
+    The emulator honours ANDROID_AVD_HOME, then ANDROID_USER_HOME/avd, then
+    ANDROID_SDK_HOME/.android/avd (Android Studio sometimes sets this to the
+    SDK root, which puts AVDs under <sdk>/.android/avd), then ~/.android/avd.
+    """
+    out: list[Path] = []
+    env = os.environ
+    if env.get("ANDROID_AVD_HOME"):
+        out.append(Path(env["ANDROID_AVD_HOME"]))
+    if env.get("ANDROID_USER_HOME"):
+        out.append(Path(env["ANDROID_USER_HOME"]) / "avd")
+    if env.get("ANDROID_SDK_HOME"):
+        out.append(Path(env["ANDROID_SDK_HOME"]) / ".android" / "avd")
+    sdk_root = find_sdk_root()
+    if sdk_root:
+        out.append(sdk_root / ".android" / "avd")
+    out.append(Path.home() / ".android" / "avd")
+    seen: set[Path] = set()
+    uniq: list[Path] = []
+    for path in out:
+        path = path.expanduser()
+        if path not in seen:
+            seen.add(path)
+            uniq.append(path)
+    return uniq
+
+
+def find_avd_config(name: str) -> Path | None:
+    for home in avd_home_candidates():
+        cfg = home / f"{name}.avd" / "config.ini"
+        if cfg.is_file():
+            return cfg
+    return None
+
+
+def set_avd_config_value(cfg: Path, key: str, value: str) -> None:
+    lines = cfg.read_text(encoding="utf-8", errors="replace").splitlines()
+    prefix = f"{key}="
+    replaced = False
+    for i, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[i] = f"{key}={value}"
+            replaced = True
+    if not replaced:
+        lines.append(f"{key}={value}")
+    cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def list_avds(emulator_bin: str | None) -> list[str]:
     if not emulator_bin:
         return []
@@ -206,13 +262,11 @@ def list_avds(emulator_bin: str | None) -> list[str]:
             return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     except Exception:
         pass
-    avd_home = Path.home() / ".android" / "avd"
-    if avd_home.is_dir():
-        names: list[str] = []
-        for ini in avd_home.glob("*.ini"):
-            names.append(ini.stem)
-        return sorted(names)
-    return []
+    names: set[str] = set()
+    for avd_home in avd_home_candidates():
+        if avd_home.is_dir():
+            names.update(ini.stem for ini in avd_home.glob("*.ini"))
+    return sorted(names)
 
 
 def list_assets(download_dir: Path) -> list[AssetInfo]:
@@ -263,6 +317,32 @@ def get_default_system_image_path(sdk_root: Path | None) -> Path | None:
 
     candidates.sort(key=api_key, reverse=True)
     return Path(candidates[0]["path"])
+
+
+def read_kernel_bytes(path: Path, limit: int = 60_000_000) -> bytes:
+    with open(path, "rb") as f:
+        header = f.read(6)
+    if header.startswith(b"\x1f\x8b"):
+        with gzip.open(path, "rb") as gz:
+            return gz.read(limit)
+    if header.startswith(b"\xfd7zXZ"):
+        with lzma.open(path, "rb") as xz:
+            return xz.read(limit)
+    with open(path, "rb") as f:
+        return f.read(limit)
+
+
+def kernel_has_kernelsu(path: Path) -> bool:
+    """True when the kernel image already carries KernelSU (built in or patched).
+
+    Some recent emulator system images ship a KernelSU kernel; replacing it
+    with a downloaded GKI build only risks a version mismatch.
+    """
+    try:
+        data = read_kernel_bytes(path)
+    except Exception:
+        return False
+    return b"KernelSU" in data or b"ksu_handle_" in data
 
 
 def detect_target_kernel_version(target_dir: Path) -> str | None:
@@ -471,6 +551,13 @@ def patch_kernel(
         }
 
     backup = target_dir / "kernel-ranchu.orig"
+    if explicit_source is None and kernel_has_kernelsu(dest):
+        return {
+            "target": str(dest),
+            "backup": str(backup) if backup.exists() else None,
+            "source_kernel": str(dest),
+            "status": "already_patched",
+        }
     tmp_clean: Path | None = None
     try:
         src_image, tmp_clean = resolve_kernel_source(download_dir, explicit_source, target_dir)
@@ -508,7 +595,7 @@ def create_avd(
     package_path: str,
     device: str = DEFAULT_DEVICE,
     force: bool = True,
-) -> bool:
+) -> CreateAvdResult:
     cmd = [
         avdmanager_bin,
         "create",
@@ -529,7 +616,23 @@ def create_avd(
         text=True,
         timeout=60.0,
     )
-    return proc.returncode == 0
+    result: CreateAvdResult = {
+        "avd": name,
+        "system_image_package": package_path,
+        "device": device,
+        "success": proc.returncode == 0,
+    }
+    if proc.returncode != 0:
+        result["error"] = (proc.stderr or proc.stdout).strip()[-2000:]
+        return result
+    cfg = find_avd_config(name)
+    result["config_ini"] = str(cfg) if cfg else None
+    # avdmanager leaves PlayStore.enabled=false even on a google_apis_playstore
+    # image, so the emulator boots without Play services UI.
+    if cfg and "playstore" in package_path:
+        set_avd_config_value(cfg, "PlayStore.enabled", "yes")
+        result["play_store_enabled"] = True
+    return result
 
 
 def cold_boot(
@@ -643,11 +746,13 @@ def install_apk(adb_bin: str, apk_path: Path, serial: str | None = None) -> Inst
     try:
         proc = run_command(cmd, timeout=60.0)
         success = proc.returncode == 0 and "Success" in proc.stdout
+        launched = launch_kernelsu_manager(adb_bin, serial) if success else None
         return {
             "apk": str(apk_path),
             "serial": serial or "default",
             "success": success,
             "output": (proc.stdout + "\n" + proc.stderr).strip(),
+            "launched_package": launched,
         }
     except Exception as exc:
         return {
@@ -658,14 +763,68 @@ def install_apk(adb_bin: str, apk_path: Path, serial: str | None = None) -> Inst
         }
 
 
+KERNELSU_PACKAGE_RE = re.compile(r"package:(\S*(?:ksunext|kernelsu|weishu)\S*)", re.IGNORECASE)
+
+# KernelSU exposes su through a kernel hook on these paths. KernelSU-Next with
+# "Umount modules" enabled hides them from the adb shell mount namespace.
+SU_CANDIDATES = ("su", "/system/bin/su", "/debug_ramdisk/su", "/data/adb/ksu/bin/su")
+
+SU_HINT = (
+    "su is missing or denied for the adb shell. Open KernelSU Manager, grant "
+    "Superuser to Shell (com.android.shell), and on KernelSU-Next turn off "
+    "Settings > Umount modules. Then run verify-root again."
+)
+
+
+def adb_base(adb_bin: str, serial: str | None) -> list[str]:
+    return [adb_bin, "-s", serial] if serial else [adb_bin]
+
+
+def launch_kernelsu_manager(adb_bin: str, serial: str | None) -> str | None:
+    """Start the manager once so it installs ksud and the su bridge."""
+    try:
+        proc = run_command(adb_base(adb_bin, serial) + ["shell", "pm", "list", "packages"], timeout=15.0)
+    except Exception:
+        return None
+    m = KERNELSU_PACKAGE_RE.search(proc.stdout)
+    if not m:
+        return None
+    pkg = m.group(1)
+    try:
+        run_command(
+            adb_base(adb_bin, serial)
+            + ["shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"],
+            timeout=15.0,
+        )
+    except Exception:
+        pass
+    return pkg
+
+
 def verify_root(adb_bin: str, serial: str | None = None) -> VerifyRootResult:
-    cmd = [adb_bin]
-    if serial:
-        cmd.extend(["-s", serial])
-    cmd.extend(["shell", "su", "-c", "id"])
+    last_out = ""
+    for su_path in SU_CANDIDATES:
+        res = _verify_root_with(adb_bin, serial, su_path)
+        if res["rooted"]:
+            res["su_path"] = su_path
+            return res
+        last_out = last_out or res["raw_output"]
+    return {
+        "serial": serial or "default",
+        "rooted": False,
+        "uid": None,
+        "gid": None,
+        "raw_output": last_out,
+        "su_path": None,
+        "hint": SU_HINT,
+    }
+
+
+def _verify_root_with(adb_bin: str, serial: str | None, su_path: str) -> VerifyRootResult:
+    cmd = adb_base(adb_bin, serial) + ["shell", su_path, "-c", "id"]
     try:
         proc = run_command(cmd, timeout=15.0)
-        out = proc.stdout.strip()
+        out = (proc.stdout + proc.stderr).strip()
         uid: int | None = None
         gid: int | None = None
         m_uid = re.search(r"uid=(\d+)", out)
@@ -711,11 +870,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
+    # Accept --json after the subcommand as well. SUPPRESS keeps a --json given
+    # before the subcommand from being reset to False by the subparser default.
+    sub_common = argparse.ArgumentParser(add_help=False)
+    sub_common.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Output raw JSON instead of human-readable text",
+    )
+
+    def add_sub(name: str, **kwargs: Any) -> argparse.ArgumentParser:
+        return subparsers.add_parser(name, parents=[sub_common], **kwargs)
+
     # list
-    subparsers.add_parser("list", help="List SDK, system images, AVDs, and KernelSU assets")
+    add_sub("list", help="List SDK, system images, AVDs, and KernelSU assets")
 
     # download
-    p_download = subparsers.add_parser(
+    p_download = add_sub(
         "download", help="Download matching KernelSU GKI kernel zip and Manager APK"
     )
     p_download.add_argument(
@@ -729,7 +901,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--kernel-only", action="store_true", help="Download only KernelSU GKI kernel zip"
     )
     # create-avd
-    p_create = subparsers.add_parser("create-avd", help="Create a new AVD")
+    p_create = add_sub("create-avd", help="Create a new AVD")
     p_create.add_argument("--name", default=DEFAULT_AVD_NAME, help="AVD name")
     p_create.add_argument(
         "--system-image",
@@ -741,7 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # patch-kernel
-    p_patch = subparsers.add_parser(
+    p_patch = add_sub(
         "patch-kernel", help="Replace kernel-ranchu in system image directory"
     )
     p_patch.add_argument(
@@ -756,26 +928,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # cold-boot
-    p_boot = subparsers.add_parser("cold-boot", help="Cold boot the emulator")
+    p_boot = add_sub("cold-boot", help="Cold boot the emulator")
     p_boot.add_argument("--avd", default=DEFAULT_AVD_NAME, help="AVD name to boot")
     p_boot.add_argument("--headless", action="store_true", help="Run without UI window or audio")
 
     # wait-boot
-    p_wait = subparsers.add_parser("wait-boot", help="Wait for emulator boot completion")
+    p_wait = add_sub("wait-boot", help="Wait for emulator boot completion")
     p_wait.add_argument("--serial", help="Device serial (e.g. emulator-5554)")
     p_wait.add_argument("--timeout", type=float, default=180.0, help="Boot timeout in seconds")
 
     # install-apk
-    p_apk = subparsers.add_parser("install-apk", help="Install KernelSU Manager APK to emulator")
+    p_apk = add_sub("install-apk", help="Install KernelSU Manager APK to emulator")
     p_apk.add_argument("--apk", type=Path, help="Explicit APK path (auto-detected if omitted)")
     p_apk.add_argument("--serial", help="Device serial")
 
     # verify-root
-    p_verify = subparsers.add_parser("verify-root", help="Verify root access via adb su")
+    p_verify = add_sub("verify-root", help="Verify root access via adb su")
     p_verify.add_argument("--serial", help="Device serial")
 
     # setup-all
-    p_all = subparsers.add_parser(
+    p_all = add_sub(
         "setup-all", help="Complete end-to-end flow (create, patch, cold-boot, wait, apk, verify)"
     )
     p_all.add_argument("--avd", default=DEFAULT_AVD_NAME, help="AVD name")
@@ -885,21 +1057,15 @@ def main(argv: list[str] | None = None) -> int:
                 pkg = f"system-images;{parts[0]};{parts[1]};{parts[2]}"
             else:
                 pkg = f"system-images;android-36;google_apis_playstore;{arch}"
-        ok = create_avd(
+        create_res = create_avd(
             avdmanager_bin=avdmanager_bin,
             name=args.name,
             package_path=pkg,
             device=args.device,
             force=args.force,
         )
-        create_res: CreateAvdResult = {
-            "avd": args.name,
-            "system_image_package": pkg,
-            "device": args.device,
-            "success": ok,
-        }
         emit_output(create_res, args.json)
-        return 0 if ok else 1
+        return 0 if create_res["success"] else 1
 
     if sub == "patch-kernel":
         target = args.system_image_path
@@ -920,7 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
             explicit_source=args.kernel_source,
         )
         emit_output(result, args.json)
-        return 0 if result["status"] == "patched" else 1
+        return 0 if result["status"] in {"patched", "already_patched"} else 1
 
     if sub == "cold-boot":
         if not emulator_bin:
@@ -995,7 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
             emit_output({"error": "Cannot find system image directory"}, args.json)
             return 1
         patch_res = patch_kernel(target, download_dir)
-        if patch_res["status"] != "patched":
+        if patch_res["status"] not in {"patched", "already_patched"}:
             emit_output({"step": "patch_kernel", "result": patch_res}, args.json)
             return 1
 
@@ -1009,15 +1175,15 @@ def main(argv: list[str] | None = None) -> int:
         if avd_name not in existing_avds:
             rel = target.relative_to(sdk_root / "system-images")
             pkg = f"system-images;{rel.parts[0]};{rel.parts[1]};{rel.parts[2]}"
-            create_ok = create_avd(
+            create_res = create_avd(
                 avdmanager_bin=avdmanager_bin,
                 name=avd_name,
                 package_path=pkg,
                 device=args.device,
                 force=False,
             )
-            if not create_ok:
-                emit_output({"error": f"Failed to create AVD {avd_name}"}, args.json)
+            if not create_res["success"]:
+                emit_output({"error": f"Failed to create AVD {avd_name}", "result": create_res}, args.json)
                 return 1
 
         # 3. Cold boot
@@ -1033,6 +1199,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             apk = ensure_kernelsu_apk(download_dir)
             apk_res = install_apk(adb_bin, apk, serial=wb_res["serial"])
+            # The manager installs its su bridge on first launch.
+            time.sleep(5)
         except Exception as exc:
             apk_res = {
                 "apk": "",

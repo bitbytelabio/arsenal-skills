@@ -2,7 +2,7 @@
 name: reverse-engineering
 description: Reverse a shipped binary, package, firmware image, or offline capture. Start with the file header and one matching architecture note. Open a decompiler, dynamic, or lab guide only after that, and only when the task allows it.
 metadata:
-  version: "65"
+  version: "66"
 ---
 
 # Reverse Engineering
@@ -86,7 +86,7 @@ Run the automated triage scanner on the target artifact. `scripts/` is relative 
 ```bash
 uv run scripts/auto_triage.py <target_artifact>
 # or
-python3 scripts/auto_triage.py <target_artifact>
+uv run scripts/auto_triage.py <target_artifact>
 ```
 The triage scanner inspects file magic, sections, and runtime strings to output a normalized JSON classification and recommend the matching domain reference below.
 
@@ -125,7 +125,7 @@ This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and ma
 | Passive function tracing, Java/ObjC hooking, API monitoring | Dynamic Binary Instrumentation (Frida scripts) | [02-dynamic-instrumentation/frida-hooking.md](references/02-dynamic-instrumentation/frida-hooking.md) |
 | Packed sections (`UPX0`), high entropy, runtime crypters | Dynamic Unpacking, OEP Detection & Memory Dumping | [02-dynamic-instrumentation/unpacking-memory-dump.md](references/02-dynamic-instrumentation/unpacking-memory-dump.md) |
 | Which input reaches a parser, or obfuscation has made the decompiler untrustworthy | Staged deep fuzzing to test a hypothesis and recover logic | [02-dynamic-instrumentation/fuzzing-for-reversing.md](references/02-dynamic-instrumentation/fuzzing-for-reversing.md) |
-| HTTP/S APIs, WebSockets, TLS decryption, backend-contract recovery, or a multi-stage C2 channel | mitmproxy capture, API map, and lab-only response trials | [02-dynamic-instrumentation/network-traffic-proxy.md](references/02-dynamic-instrumentation/network-traffic-proxy.md) |
+| HTTP/S APIs, WebSockets, TLS decryption, backend-contract recovery, or a multi-stage client/server channel (desktop, CLI, VM, container, or mobile) | mitmproxy mode choice, CA trust, capture, API map, and lab-only mocks or replay | [02-dynamic-instrumentation/network-traffic-proxy.md](references/02-dynamic-instrumentation/network-traffic-proxy.md) |
 | DNS, TCP or UDP sessions, TLS metadata, beacon timing, or a stream the proxy cannot see | Wireshark and tshark from the frame up, then the proxy or the protocol reference | [02-dynamic-instrumentation/network-traffic-proxy.md](references/02-dynamic-instrumentation/network-traffic-proxy.md) |
 | Malware detonation, a sandbox report, Docker/VM containment, remote debuggers | Containment, then read the report by its rows rather than by family reputation | [02-dynamic-instrumentation/malware-sandbox-isolation.md](references/02-dynamic-instrumentation/malware-sandbox-isolation.md) |
 | Mobile SSL/TLS unpinning (Android OkHttp/TrustManager/WebView/Cronet, iOS SecTrust/NSURLSession, Flutter BoringSSL) | Mobile SSL Pinning Bypass & Proxy Interception | [02-dynamic-instrumentation/network-traffic-proxy.md](references/02-dynamic-instrumentation/network-traffic-proxy.md) |
@@ -145,7 +145,8 @@ This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and ma
 
 | Tool & Execution Environment | Scope & Capabilities | Progressive Reference |
 |---|---|---|
-| IDA Pro 9.x Native & Hex-Rays MCP | Headless automation, OMP `xd://ida`, official Hex-Rays `ida-mcp`, IDAPython, dbgsrv | [04-tool-usage/ida-pro.md](references/04-tool-usage/ida-pro.md) |
+| IDA Pro 9.x through official Hex-Rays `ida-mcp` | `open_database` + `execute_python` (IDAPython / `ida-domain`), save and close, dbgsrv | [04-tool-usage/ida-pro.md](references/04-tool-usage/ida-pro.md) |
+| Driving IDA's remote debugger from an agent through official `ida-mcp` | Bounded `ida/re_dbg.py` helper loaded with `execute_python`: start/attach, step, trace breakpoints, live memory | [04-tool-usage/ida-mcp-remote-debugging.md](references/04-tool-usage/ida-mcp-remote-debugging.md) |
 | REA Ghidra Server & Headless Analyzers | Reverse Engineering Assistant (REA), Ghidra headless scripts, decompilation caching | [04-tool-usage/rea-ghidra.md](references/04-tool-usage/rea-ghidra.md) |
 | Frida Dynamic Instrumentation Runtime | JavaScript/TypeScript instrumentation, Stalker, memory scanning, Java/ObjC bridges | [04-tool-usage/frida.md](references/04-tool-usage/frida.md) |
 | IPSW Apple Firmware Tooling | iOS/macOS kernel cache extraction, DFU images, dyld shared cache extraction, symbols | [04-tool-usage/ipsw.md](references/04-tool-usage/ipsw.md) |
@@ -217,7 +218,7 @@ All execution, dynamic tracing, unpacking, and instrumentation MUST run exclusiv
 Filter baseline OS noise (`CreateFile`, `ReadFile`) and prioritize high-risk malicious clusters:
 - **Process Injection Cluster**: `FindWindowA/W` / `OpenProcess` + `VirtualAllocEx` + `WriteProcessMemory` + `CreateRemoteThread`.
 - **Ransomware / Wiper Cluster**: `CryptEncrypt` / `CryptAcquireContext` + recursive `FindFirstFile` / `FindNextFile` + `DeleteFile` / `MoveFileWithProgress`.
-- **C2 & Persistence Cluster**: `InternetOpen` / `WinHttpOpen` / `URLDownloadToFile` + `RegSetValueEx` / `CreateService`.
+- **Network & Persistence Cluster**: `InternetOpen` / `WinHttpOpen` / `URLDownloadToFile` + `RegSetValueEx` / `CreateService`.
 
 ### 5. IAT Repair Iron Rules & Self-Check Crash Bypass
 - **IAT Repair Iron Rule**: When unpacking PE binaries, use ImportREC for 32-bit and Scylla for 64-bit. If the automated repair tool errors, produces a non-functional binary, or encounters encrypted/VM-protected imports:
@@ -311,7 +312,10 @@ Executable helper scripts located in `scripts/`:
 - `check_deliverables.py`: Automated JSON schema and evidence ledger verification script.
 - `detect_host.py`: Host OS, package manager, and allowlisted tool probe. Installs only when asked.
 - `setup_android_emulator.py`: KernelSU-rooted Play emulator.
-- `setup_proxy_ca.py`: mitmproxy CA install and Android proxy setting.
+- `setup_proxy_ca.py`: mitmproxy CA export and install for Android and the iOS Simulator, and the Android proxy setting. Desktop, VM, and runtime trust stores are in the proxy reference.
 - `setup_utm.py`: UTM snapshots, disposable start, and QCOW2 helpers.
 - `setup_vm.py`: Guest Ansible catalogs for Windows, Linux, and macOS. `setup_windows_vm.py` is the Windows wrapper.
-- `ansible/`: Playbooks and tool catalogs used by `setup_vm.py`.
+- `ansible/`: Playbooks and tool catalogs used by `setup_vm.py`. Run `setup_vm.py deps --install` once on the host before the first playbook.
+- `ida/re_dbg.py`: IDAPython helper for bounded remote debugging through `ida-mcp` `execute_python`. It runs inside IDA, not through uv.
+
+Every file in `scripts/` is a uv inline script. Run it as `uv run scripts/<name>.py`; uv installs the dependencies listed in the script header.

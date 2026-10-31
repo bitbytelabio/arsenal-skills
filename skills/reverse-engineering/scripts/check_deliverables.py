@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Mechanical deliverable check: structure only, never a content grade.
 
 Checks that:
@@ -13,7 +17,7 @@ Exit 0 when no structural failure, 1 otherwise. Never edits the deliverables.
 Never reads or runs the target.
 
 Usage:
-  python3 check_deliverables.py [--analysis output/analysis.json]
+  uv run scripts/check_deliverables.py [--analysis output/analysis.json]
       [--evidence output/evidence.md] [--schema analysis.schema.json]
 """
 

@@ -1,87 +1,26 @@
-# IDA Pro Reverse Engineering Guide — OMP Native Integration & Official Hex-Rays Workflows
+# IDA Pro Reverse Engineering Guide — Official Hex-Rays `ida-mcp` Workflows
 
-- **Domain**: IDA Pro 9.x headless automation, OMP Native IDA device (`xd://ida`), official Hex-Rays Model Context Protocol server (`HexRaysSA/ida-mcp`), modern IDAPython APIs (`ida_*`), and cross-platform remote debugging orchestration (`dbgsrv/`).
-- **Scope**: Dual integration modes (OMP native `xd://ida` with instant `read` views vs official Hex-Rays `ida-mcp` stdio daemon), 7 concrete reverse engineering workflows (auto-analysis, xrefs/string tracing, Hex-Rays decompilation, type recovery/structs, C++ vtable/hierarchy recovery, binary patching, and containerized remote debugging), 4 complete IDAPython automation scripts, and operational best practices.
+- **Domain**: IDA Pro 9.x driven by agents through the official Hex-Rays MCP server (`HexRaysSA/ida-mcp`), modern IDAPython APIs (`ida_*`), the `ida-domain` API, and cross-platform remote debugging (`dbgsrv/`).
+- **Scope**: The `ida-mcp` tool surface, 7 concrete reverse engineering workflows (auto-analysis, xrefs/string tracing, Hex-Rays decompilation, type recovery/structs, C++ vtable/hierarchy recovery, binary patching, and remote debugging), IDAPython automation scripts, and operational practices.
 
 ---
 
 ## 1. Overview & Architecture
 
-Modern automated reverse engineering with IDA Pro avoids interactive graphical bottlenecks and fragile wrapper tools. The ecosystem centers around two primary integration models: **OMP Native IDA Integration** (`xd://ida`) and the **Official Hex-Rays `ida-mcp` Server** (`HexRaysSA/ida-mcp`).
+Agents drive IDA only through the official **Hex-Rays `ida-mcp` server**. Every workflow below is IDAPython or `ida-domain` code sent as the `code` argument of `execute_python`. Do not use other IDA wrappers or harness-specific IDA devices alongside it; two writers on one `.i64` corrupt it.
 
-```
-+---------------------------------------------------------------------------------------------------+
-|                               IDA Pro Autonomous Integration Matrix                               |
-+------------------------------+----------------------------------+---------------------------------+
-| Dimension                    | OMP Native IDA (`xd://ida`)      | Official Hex-Rays `ida-mcp`     |
-+------------------------------+----------------------------------+---------------------------------+
-| Implementation / Upstream    | Harness Native Daemon Supervisor | `HexRaysSA/ida-mcp` (Official)  |
-| Runtime Engine               | Headless IDA DB daemon           | `idalib` Python 3.11+ bindings  |
-| Transport Channel            | Direct OMP internal IPC          | JSON-RPC over stdio / HTTP      |
-| Storage & Concurrency        | `~/.omp/agent/idbs/<sha16>-<name>`| Local `.i64` companion files    |
-| Multi-Agent Collaboration    | Shared DB access, lock-free      | Single-process exclusive lock   |
-| Disassembly / Pseudocode View| Instant `read` selectors         | JSON-RPC tool call responses    |
-| Database Mutation Method     | `write xd://ida` structured JSON | MCP Tool calling protocol       |
-+------------------------------+------------------------------+-------------------------------------+
-```
+### 1.1 Official Hex-Rays `ida-mcp` Server (`HexRaysSA/ida-mcp`)
+The official server is built on IDA Nexus and the `ida-domain` API. It runs headless workers through `idalib`/`idat`, or attaches to a database open in the IDA GUI.
 
-### 1.1 OMP Native IDA Integration (`xd://ida`)
-OMP runs persistent headless IDA database daemons named `omp.ida.<id>` that isolate database operations from direct client process lifetimes.
-
-- **Storage Location**: Databases are maintained in `~/.omp/agent/idbs/<sha16>-<name>/`, where `<sha16>` is the hex hash of the original binary content and `<name>` is the sanitized binary basename.
-- **Lock-Free Multi-Agent Concurrency**: Multiple subagents and parallel analysis threads can read disassembly, pseudocode, and cross-references concurrently against the active daemon without database collision or lock contention errors (`.idb`/`.i64` lock files are handled entirely inside the background daemon).
-- **Autosave Engine**: Daemons automatically flush dirty database pages to disk after ~10 seconds of idle time and immediately upon an explicit save action.
-- **Zero-Latency `read` Selectors**: Code and metadata can be inspected instantly without calling tool roundtrips:
-  - `read bin:main`: Retrieve Hex-Rays decompiled C pseudocode for symbol `main`.
-  - `read bin:sub_401000:asm`: Disassemble instructions starting at address `0x401000`.
-  - `read bin:imports`: Retrieve dynamic import tables (symbols, libraries, ordinals).
-  - `read bin:exports`: Retrieve exported functions and addresses.
-  - `read bin:strings`: Enumerate detected ASCII, UTF-8, and UTF-16 string literals.
-  - `read bin:xrefs:sub_401000`: Enumerate all inbound and outbound cross-references for target symbol or address.
-- **Structured Database Mutations (`write xd://ida`)**: Apply modifications to the persistent database using structured JSON commands:
-  ```json
-  // Rename a function or label
-  {"action": "rename", "address": "0x401050", "name": "decrypt_payload"}
-
-  // Set regular or repeatable comments
-  {"action": "comment", "address": "0x401082", "comment": "AES-256-CBC S-box initialization", "repeatable": true}
-
-  // Set function prototype declaration
-  {"action": "set_type", "address": "0x401050", "decl": "int __fastcall decrypt_payload(const uint8_t *src, size_t len, uint8_t *dst)"}
-
-  // Define a new function boundary
-  {"action": "make_function", "address": "0x402100"}
-
-  // Execute arbitrary headless IDAPython code snippet
-  {"action": "exec", "code": "import ida_bytes; print(hex(ida_bytes.get_dword(0x401000)))"}
-
-  // Persist changes to disk and flush dirty cache
-  {"action": "save"}
-
-  // Safely close database and terminate daemon worker
-  {"action": "close", "save": true}
-  ```
-
-### 1.2 Official Hex-Rays `ida-mcp` Server (`HexRaysSA/ida-mcp`)
-The official Hex-Rays MCP server is built directly on top of modern `idalib` Python bindings, providing full programmatic parity with the IDA Pro 9.x core engine.
-
-- **Core Prerequisites**:
-  - IDA Pro 9.4+ installed with a valid `idalib` license.
-  - Python 3.11+ virtual environment with `idalib` installed.
-- **Environment Configuration**:
+- **Install**: `uvx ida-hcli mcp install` installs the GUI plugin and offers agent plugins. Claude Code: `claude plugin marketplace add HexRaysSA/claude-marketplace`, then `claude plugin install ida-mcp@HexRaysSA`.
+- **Tools** (six, no debugger tool): `open_database(path, set_current, load_options, gui)`, `execute_python(code, instance_id, timeout)`, `reference(query)`, `list_databases()`, `save_database(instance_id)`, `close_database(instance_id)`. Globals defined in `execute_python` persist for the agent's database lease. The default `timeout` is 360 s.
+- **Transports**:
   ```bash
-  export IDADIR="/Applications/IDA Pro 9.4/idabin"
-  export IDAPYTHON_VENV_EXECUTABLE="$(pwd)/.venv/bin/python"
-  export IDA_NEXUS_IDALIB_ONLY=1
+  ida-mcp stdio --agent=re-agent --idle-timeout=900 --database /path/to/binary_or_idb
+  ida-mcp http --host 127.0.0.1 --port 8737 --database /path/to/target.i64
   ```
-- **Execution Transport**:
-  ```bash
-  # Launch stdio transport for agent MCP routing
-  ida-mcp stdio --agent=omp-re --idle-timeout=900 /path/to/binary_or_idb
-
-  # Launch streamable HTTP transport for remote access
-  ida-mcp http --host 127.0.0.1 --port 8737 /path/to/target.i64
-  ```
+- `IDA_NEXUS_IDALIB_ONLY=1` keeps workers in the server's Python environment and skips the GUI. Leave it unset when you need `gui=true`, which includes every debugger session.
+- **Remote debugging**: there is no debug tool. Load the bounded helper `ida/re_dbg.py` through `execute_python` and follow [ida-mcp-remote-debugging.md](ida-mcp-remote-debugging.md).
 
 ---
 
@@ -118,20 +57,16 @@ When analyzing a new binary, IDA Pro generates a new `.i64` database and starts 
    On Windows PE, look for `WinMain`, `wWinMain`, or parse the CRT initialization routine (`__tmainCRTStartup`).
 
 ### Workflow 2: Cross-Reference & String Tracing
-Critical malware components (C2 URLs, decryption keys, API tokens, configuration blocks) are anchored by string literals and global constants.
+Critical components (server URLs, decryption keys, API tokens, configuration blocks) are anchored by string literals and global constants.
 
 1. **Querying Detected Strings**:
-   Using OMP native view:
-   ```bash
-   read bin:strings
-   ```
-   Using IDAPython to search for regex or key terms:
+   Search strings for key terms (one `execute_python` call):
    ```python
    import idautils
    import ida_bytes
    import re
 
-   pattern = re.compile(r"c2|token|key|https?://", re.IGNORECASE)
+   pattern = re.compile(r"token|key|https?://", re.IGNORECASE)
    str_list = idautils.Strings()
    for s in str_list:
        text = str(s)
@@ -159,11 +94,7 @@ Critical malware components (C2 URLs, decryption keys, API tokens, configuration
 Hex-Rays generates high-level C ASTs (`cfunc_t`) that can be analyzed and annotated directly.
 
 1. **Decompiling Functions**:
-   Using OMP view:
-   ```bash
-   read bin:sub_401050
-   ```
-   Using IDAPython:
+   In `execute_python`:
    ```python
    import ida_hexrays
 
@@ -178,11 +109,7 @@ Hex-Rays generates high-level C ASTs (`cfunc_t`) that can be analyzed and annota
    import ida_name
 
    # Rename function
-   ida_name.set_name(0x401050, "parse_c2_command", ida_name.SN_CHECK)
-   ```
-   Via OMP native mutation:
-   ```json
-   {"action": "rename", "address": "0x401050", "name": "parse_c2_command"}
+   ida_name.set_name(0x401050, "parse_server_command", ida_name.SN_CHECK)
    ```
 3. **Setting Regular and Repeatable Comments**:
    Add inline documentation for future analysis:
@@ -193,11 +120,7 @@ Hex-Rays generates high-level C ASTs (`cfunc_t`) that can be analyzed and annota
    ida_bytes.set_cmt(0x401080, "Command 0x05 = Download & Execute payload", False)
 
    # Repeatable comment (visible across all xref callsites)
-   ida_bytes.set_cmt(0x401050, "C2 packet handler dispatcher", True)
-   ```
-   Via OMP native mutation:
-   ```json
-   {"action": "comment", "address": "0x401050", "comment": "C2 packet handler dispatcher", "repeatable": true}
+   ida_bytes.set_cmt(0x401050, "Command packet handler dispatcher", True)
    ```
 
 ### Workflow 4: Type Recovery & Struct Reconstruction
@@ -208,7 +131,7 @@ Applying formal C prototypes and structure layouts simplifies complex memory poi
    ```python
    import ida_typeinf
 
-   decl = "int __fastcall parse_c2_packet(const uint8_t *buffer, size_t length, connection_state_t *state);"
+   decl = "int __fastcall parse_command_packet(const uint8_t *buffer, size_t length, connection_state_t *state);"
    tif = ida_typeinf.tinfo_t()
    til = ida_typeinf.get_idati()
 
@@ -217,14 +140,6 @@ Applying formal C prototypes and structure layouts simplifies complex memory poi
    if res:
        ida_typeinf.apply_tinfo(0x401050, tif, ida_typeinf.TINFO_DEFINITE)
        print("[+] Prototype successfully applied.")
-   ```
-   Via OMP native mutation:
-   ```json
-   {
-     "action": "set_type",
-     "address": "0x401050",
-     "decl": "int __fastcall parse_c2_packet(const uint8_t *buffer, size_t length, void *state)"
-   }
    ```
 2. **Applying Struct Offsets to Pointers / Registers (`T` key)**:
    When decompilation shows raw offsets (`*(a1 + 32)`), apply the reconstructed struct type to the variable:
@@ -530,10 +445,7 @@ if __name__ == "__main__":
      ```
    - Limit string searches to specific sections (`.rodata`, `.rdata`) instead of traversing entire memory mappings.
 2. **Session & Database Management**:
-   - In both OMP native daemons and `ida-mcp`, ensure changes are explicitly persisted and databases are closed when done:
-     ```json
-     {"action": "close", "save": true}
-     ```
+   - Persist changes with `save_database()` and release the lease with `close_database()` when done. A GUI database stays open for the user.
    - Releasing databases frees file locks and system RAM, preventing corrupted `.i64` states.
 3. **Headless Execution Rules & Anti-Patterns**:
    - **Never invoke blocking UI dialogs**: Functions such as `ida_kernwin.ask_str`, `ask_file`, or `ask_yn` will cause headless workers to hang indefinitely awaiting interactive GUI input.

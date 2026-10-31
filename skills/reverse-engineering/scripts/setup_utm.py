@@ -873,13 +873,15 @@ def cmd_send_input(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # --json works before or after the subcommand. SUPPRESS on the subcommand
+    # copy keeps a top-level --json from being reset to False by the subparser.
     parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    parent_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output results in JSON format")
 
     parser = argparse.ArgumentParser(
         description="UTM hypervisor, QCOW2 snapshot, and IDA Pro remote debugging helper",
-        parents=[parent_parser],
     )
+    parser.add_argument("--json", action="store_true", default=False, help="Output results in JSON format")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -924,12 +926,15 @@ def main(argv: list[str] | None = None) -> int:
     p_disp = subparsers.add_parser("start-disposable", parents=[parent_parser], help="Start VM in disposable mode without saving changes")
     p_disp.add_argument("vm", help="VM name or UUID")
 
-    # guest-exec <vm> <command> [--args arg1 arg2...]
+    # guest-exec <vm> [--timeout N] <command> [--args arg1 -Flag ...]
+    # --args takes everything after it, so guest flags such as -NoProfile or /c
+    # are passed through instead of being parsed as options of this script.
+    # Put --timeout and --json before --args.
     p_gexec = subparsers.add_parser("guest-exec", parents=[parent_parser], help="Run a command inside guest VM via QEMU Guest Agent (AppleScript)")
     p_gexec.add_argument("vm", help="VM name or UUID")
     p_gexec.add_argument("command", help="Command or executable path inside guest")
-    p_gexec.add_argument("--args", nargs="*", default=[], help="Command arguments")
-    p_gexec.add_argument("--timeout", type=int, default=60, help="Execution timeout in seconds (default: 60)")
+    p_gexec.add_argument("--timeout", type=int, default=60, help="Execution timeout in seconds (default: 60). Must come before --args")
+    p_gexec.add_argument("--args", nargs=argparse.REMAINDER, default=[], help="Guest arguments; everything after --args is passed verbatim, including values that start with '-'")
 
     # guest-push <vm> <host_file> <guest_path>
     p_gpush = subparsers.add_parser("guest-push", parents=[parent_parser], help="Copy host file to guest via QEMU Guest Agent")
@@ -980,7 +985,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.subcommand == "start-disposable":
         return cmd_start_disposable(args.vm, args.json)
     elif args.subcommand == "guest-exec":
-        return cmd_guest_exec(args.vm, args.command, args.args, args.timeout, args.json)
+        guest_args = list(args.args or [])
+        if guest_args[:1] == ["--"]:
+            guest_args = guest_args[1:]
+        return cmd_guest_exec(args.vm, args.command, guest_args, args.timeout, args.json)
     elif args.subcommand == "guest-push":
         return cmd_guest_push(args.vm, args.host_file, args.guest_path, args.json)
     elif args.subcommand == "guest-pull":

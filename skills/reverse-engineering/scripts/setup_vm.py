@@ -61,6 +61,16 @@ VALID_CATEGORIES: set[str] = {
 
 SUPPORTED_OS = ("windows", "linux", "macos")
 
+# Collections the three playbooks import. pywinrm is needed in Ansible's own
+# Python for WinRM, which is not the Python on PATH when Ansible came from uv/pipx.
+REQUIRED_COLLECTIONS = (
+    "ansible.windows",
+    "community.windows",
+    "chocolatey.chocolatey",
+    "community.general",
+    "ansible.posix",
+)
+
 
 @dataclass(slots=True)
 class ToolEntry:
@@ -325,7 +335,9 @@ def cmd_generate_inventory(args: argparse.Namespace) -> int:
     user = args.user.strip()
     password = getattr(args, "password", None)
     key_file = getattr(args, "key_file", None)
+    become_password = getattr(args, "become_password", None)
     port = args.port
+    become_line = f"ansible_become_password={become_password}\n" if become_password else ""
 
     _, _, default_inv_path = get_paths_for_os(target_os)
     out_path = Path(args.output).resolve() if args.output else default_inv_path
@@ -334,6 +346,8 @@ def cmd_generate_inventory(args: argparse.Namespace) -> int:
         if not password:
             print("Error: Windows WinRM inventory requires --password", file=sys.stderr)
             return 1
+        if become_password:
+            print("Note: --become-password is ignored for Windows; WinRM runs as the admin user.", file=sys.stderr)
         port = port or 5985
         transport = getattr(args, "transport", "ntlm") or "ntlm"
         scheme = "https" if port == 5986 or transport == "credssp" else "http"
@@ -368,9 +382,15 @@ ansible_become=true
 ansible_become_method=sudo
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 ansible_python_interpreter=auto_silent
-"""
+{become_line}"""
     elif target_os == "macos":
         port = port or 22
+        if not become_password:
+            print(
+                "Warning: macOS tasks use sudo (CLT, Homebrew, PF, osquery). "
+                "Pass --become-password unless the user has NOPASSWD sudo.",
+                file=sys.stderr,
+            )
         auth_parts = []
         if key_file:
             auth_parts.append(f"ansible_ssh_private_key_file={key_file}")
@@ -387,8 +407,10 @@ ansible_port={port}
 ansible_become=false
 ansible_become_method=sudo
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+# /usr/bin/python3 is a Command Line Tools stub on a fresh macOS guest.
+# playbook_macos.yml installs CLT with raw tasks before it gathers facts.
 ansible_python_interpreter=/usr/bin/python3
-"""
+{become_line}"""
     else:
         print(f"Error: Unsupported OS '{target_os}'", file=sys.stderr)
         return 1
@@ -414,6 +436,71 @@ def locate_ida_dbgsrv() -> Path | None:
         return Path(matches[0])
     opt = sorted(Path("/opt").glob("ida*/dbgsrv"), reverse=True)
     return opt[0] if opt else None
+
+
+def ansible_env() -> dict[str, str]:
+    env = os.environ.copy()
+    # macOS kills Ansible's forked WinRM workers unless this is set.
+    if sys.platform == "darwin":
+        env["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
+    return env
+
+
+def ansible_python() -> str | None:
+    """Return the interpreter Ansible itself runs on (from the shebang)."""
+    ansible_bin = shutil.which("ansible-playbook")
+    if not ansible_bin:
+        return None
+    try:
+        first = Path(ansible_bin).resolve().read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    if not first.startswith("#!"):
+        return None
+    parts = first[2:].strip().split()
+    if parts and parts[0].endswith("/env") and len(parts) > 1:
+        return shutil.which(parts[1])
+    return parts[0] if parts else None
+
+
+def cmd_deps(args: argparse.Namespace) -> int:
+    """Check, and with --install fix, the controller-side Ansible requirements."""
+    report: dict[str, Any] = {"ansible_playbook": shutil.which("ansible-playbook")}
+    galaxy = shutil.which("ansible-galaxy")
+    if not report["ansible_playbook"] or not galaxy:
+        report["error"] = "ansible not found; install it with 'uv tool install --with-executables-from ansible-core ansible' or 'brew install ansible'"
+        print(json.dumps(report, indent=2))
+        return 1
+
+    listing = subprocess.run([galaxy, "collection", "list", "--format", "json"], capture_output=True, text=True, env=ansible_env())
+    installed: set[str] = set()
+    try:
+        for coll_map in json.loads(listing.stdout or "{}").values():
+            installed.update(coll_map.keys())
+    except json.JSONDecodeError:
+        pass
+    missing = [c for c in REQUIRED_COLLECTIONS if c not in installed]
+    report["missing_collections"] = missing
+
+    py = ansible_python()
+    report["ansible_python"] = py
+    winrm_ok = bool(py) and subprocess.run([py, "-c", "import winrm"], capture_output=True).returncode == 0
+    report["pywinrm"] = winrm_ok
+
+    if args.install:
+        if missing:
+            subprocess.run([galaxy, "collection", "install", *missing], check=False, env=ansible_env())
+        if not winrm_ok and py:
+            uv = shutil.which("uv")
+            pip_cmd = [uv, "pip", "install", "--python", py, "pywinrm"] if uv else [py, "-m", "pip", "install", "pywinrm"]
+            subprocess.run(pip_cmd, check=False)
+        args.install = False
+        return cmd_deps(args)
+
+    ida = locate_ida_dbgsrv()
+    report["ida_dbgsrv"] = str(ida) if ida else None
+    print(json.dumps(report, indent=2))
+    return 0 if not missing and winrm_ok else 1
 
 
 def cmd_run_playbook(args: argparse.Namespace) -> int:
@@ -448,18 +535,22 @@ def cmd_run_playbook(args: argparse.Namespace) -> int:
         cmd.extend(["--tags", args.tags])
     if args.extra_vars:
         cmd.extend(["--extra-vars", args.extra_vars])
-    dbgsrv = locate_ida_dbgsrv()
-    if dbgsrv and "ida_dbgsrv_src" not in (args.extra_vars or ""):
-        cmd.extend(["--extra-vars", json.dumps({"ida_dbgsrv_src": str(dbgsrv)})])
+    if "ida_dbgsrv_src" not in (args.extra_vars or ""):
+        dbgsrv = locate_ida_dbgsrv()
+        if dbgsrv:
+            print(f"IDA debug servers: {dbgsrv}")
+            cmd.extend(["--extra-vars", json.dumps({"ida_dbgsrv_src": str(dbgsrv)})])
+        else:
+            print(
+                "Warning: IDA dbgsrv directory not found; the guest gets no IDA debug server. "
+                "Set IDA_DBGSRV=/path/to/dbgsrv or pass --extra-vars ida_dbgsrv_src=...",
+                file=sys.stderr,
+            )
     if args.verbose:
         cmd.append("-" + "v" * min(args.verbose, 4))
 
     print(f"Executing: {' '.join(cmd)}")
-    env = os.environ.copy()
-    # macOS kills Ansible's forked WinRM workers unless this is set.
-    if sys.platform == "darwin":
-        env["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
-    result = subprocess.run(cmd, env=env)
+    result = subprocess.run(cmd, env=ansible_env())
     return result.returncode
 
 
@@ -517,7 +608,7 @@ def cmd_defender(args: argparse.Namespace) -> int:
     if args.verbose:
         cmd.append("-" + "v" * min(args.verbose, 4))
     print(f"Executing: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=ansible_env())
     return result.returncode
 
 
@@ -627,9 +718,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_inv.add_argument("--user", required=True, help="Admin/SSH username")
     p_inv.add_argument("--password", default=None, help="Admin password (required for Windows WinRM, optional for Linux/macOS SSH)")
     p_inv.add_argument("--key-file", default=None, help="SSH private key path (for Linux/macOS SSH)")
+    p_inv.add_argument("--become-password", default=None, help="sudo password for Linux/macOS become tasks (omit with NOPASSWD sudo)")
     p_inv.add_argument("--port", type=int, default=None, help="Connection port (defaults: 5985 for WinRM, 22 for SSH)")
     p_inv.add_argument("--transport", default="ntlm", choices=["ntlm", "basic", "credssp"], help="WinRM transport auth (Windows only)")
     p_inv.add_argument("-o", "--output", help="Output file path (default: ansible/inventory_<os>.ini or ansible/inventory.ini)")
+
+    # deps
+    p_deps = subparsers.add_parser("deps", help="Check Ansible collections, pywinrm, and the IDA dbgsrv path on the controller")
+    p_deps.add_argument("--install", action="store_true", help="Install missing collections and pywinrm into Ansible's Python")
 
     # run-playbook
     p_play = subparsers.add_parser("run-playbook", help="Run Ansible provisioning playbook")
@@ -678,6 +774,8 @@ def main() -> int:
         return cmd_winrm_script(args)
     elif args.command == "generate-inventory":
         return cmd_generate_inventory(args)
+    elif args.command == "deps":
+        return cmd_deps(args)
     elif args.command == "run-playbook":
         return cmd_run_playbook(args)
     elif args.command == "defender":

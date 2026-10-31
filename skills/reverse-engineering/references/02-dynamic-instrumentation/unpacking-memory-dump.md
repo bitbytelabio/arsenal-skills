@@ -22,7 +22,7 @@ When to open this reference:
   - `diec` (Detect It Easy command line) or `rabin2 -S <binary>`.
   - Entropy profiler: `binwalk -E <binary>`.
 - **Process-Level Memory Dumpers**:
-  - `python3 scripts/dump_memory.py <pid> -o <dump_dir>`.
+  - `uv run scripts/dump_memory.py <pid> -o <dump_dir>`.
   - PE-sieve / HollowsHunter: `pe-sieve /pid <pid> /dmode 3`.
   - Windows Sysinternals ProcDump: `procdump.exe -ma <pid> target_process.dmp`.
 - **Physical Memory Acquisition Frameworks**:
@@ -106,7 +106,7 @@ Once halted at OEP, dump the unpacked memory pages before the program terminates
 
 ```bash
 # Using project dump script against running process
-python3 scripts/dump_memory.py <target_pid> -o /tmp/unpacked_dump/
+uv run scripts/dump_memory.py <target_pid> -o /tmp/unpacked_dump/
 
 # Command output extracts all writable / executable regions:
 # /tmp/unpacked_dump/mem_00400000_00450000_r-x_target.exe.bin
@@ -170,7 +170,7 @@ When dynamic unpacking is thwarted by anti-debugging countermeasures that force 
   - The process address space is frozen in its fully decrypted memory state.
   - Immediately invoke `dump_memory.py`:
     ```bash
-    python3 scripts/dump_memory.py <pid> -o /tmp/exitprocess_dump/
+    uv run scripts/dump_memory.py <pid> -o /tmp/exitprocess_dump/
     ```
   - Recover unpacked executable sections and strings directly from the dumped memory snapshot.
   - Document artifact in Evidence as `E-mem-dump-exitprocess`.

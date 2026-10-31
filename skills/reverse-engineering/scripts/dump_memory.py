@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """
 dump_memory.py - Live process and container memory region dumper.
 Provides safe, passive memory extraction for Linux (/proc/<pid>/mem), macOS (mach vm / lldb),

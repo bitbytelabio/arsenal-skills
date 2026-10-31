@@ -102,16 +102,32 @@ CMD ["/opt/dbgsrv/linux_server", "-p23946"]
 
 When analyzing samples inside a UTM guest (Windows or Linux), follow the network and guest configuration steps below.
 
-### 1. Shared Network (NAT) Port Forwarding
-1. Open UTM VM Settings -> **Network**.
-2. Network Mode: **Shared Network**.
-3. Under **Port Forwarding**, add a new rule:
-   - Protocol: `TCP`
-   - Host Port: `23946`
-   - Guest Port: `23946`
-   - Guest IP: Leave blank.
-4. Save and boot the VM.
-5. In IDA Pro on macOS, target host is `127.0.0.1` and port is `23946`.
+The provisioning playbooks already stage the servers and open the firewall:
+
+| Guest | Server location | Firewall |
+|---|---|---|
+| Windows | `C:\Tools\ida_dbgsrv\win64_remote.exe`, `win32_remote32.exe` | Rule `IDA-Pro-Remote-Debugger`, TCP 23946 |
+| Linux | `/opt/ida_dbgsrv/linux_server*` (x86_64) or `armlinux_server*` (ARM64) | UFW or firewalld, TCP 23946 |
+| macOS | `/opt/ida_dbgsrv/mac_server_arm` (Apple Silicon) or `mac_server` | PF anchor `com.re.tools`, TCP 23946 |
+
+They are copied only when `setup_vm.py run-playbook` finds the IDA `dbgsrv` folder on the host. If the play prints "IDA debug servers NOT copied", set `IDA_DBGSRV=/path/to/dbgsrv` and run it again.
+
+Windows 11 on Apple Silicon is ARM64. `win64_remote.exe` runs there under x64 emulation and debugs x64 and x86 processes. IDA 9.4 ships no native ARM64 Windows server, so native ARM64 PE targets need WinDbg in the guest instead.
+
+### 1. Shared Network: connect to the guest IP
+UTM **Shared Network** (vmnet) has no port forwarding. Connect IDA straight to the guest address on the `192.168.64.0/24` or `192.168.65.0/24` bridge:
+```bash
+utmctl ip-address "<VM_NAME_OR_UUID>"     # needs the QEMU guest agent
+```
+In IDA, set the hostname to that address and the port to `23946`.
+
+### 1b. Emulated VLAN: port forwarding to 127.0.0.1
+Port forwarding works only in **Emulated VLAN** mode (QEMU user networking).
+1. UTM VM Settings -> **Network** -> Network Mode: **Emulated VLAN**.
+2. **Port Forwarding** -> add TCP, host `127.0.0.1:23946` -> guest port `23946`.
+3. Save and boot. In IDA, the hostname is `127.0.0.1` and the port is `23946`.
+
+Use Emulated VLAN when the guest gets no DHCP lease on Shared Network. That happened with the Ubuntu cloud image on UTM 5. SSH is forwarded the same way, for example host 2222 -> guest 22.
 
 ### 2. Bridged Network
 1. Set Network Mode to **Bridged (Advanced)**.
@@ -134,7 +150,7 @@ When analyzing samples inside a UTM guest (Windows or Linux), follow the network
    ```
 4. Start the server:
    ```bash
-   ./linux_server -p23946
+   /opt/ida_dbgsrv/armlinux_server -p23946    # or linux_server on x86_64
    ```
 
 ### Guest Configuration: Windows VM
@@ -145,7 +161,11 @@ When analyzing samples inside a UTM guest (Windows or Linux), follow the network
    ```
 3. Start the debug server with Administrator privileges:
    ```cmd
-   win64_remote.exe -p23946
+   C:\Tools\ida_dbgsrv\win64_remote.exe -p23946
+   ```
+   From the host without the GUI, use the QEMU guest agent:
+   ```bash
+   uv run scripts/setup_utm.py guest-exec "Windows-RE-Lab" cmd.exe --args /c start "" C:\Tools\ida_dbgsrv\win64_remote.exe -p23946
    ```
 
 ---
@@ -208,6 +228,9 @@ Go to **Debugger -> Process options...**:
 - Press **F9** to connect to the remote server and start execution.
 - Press **Attach to process...** under Debugger menu to attach to an already running PID in the guest.
 
+### 4. Driving the debugger from an agent
+To run the session through the official `HexRaysSA/ida-mcp` server instead of the GUI, load the bounded helper and follow [../04-tool-usage/ida-mcp-remote-debugging.md](../04-tool-usage/ida-mcp-remote-debugging.md). Debugger selection, process options, and entry breakpoints there map to `re_dbg.load`, `re_dbg.start`, and `break_on_entry`.
+
 ---
 
 ## 6. Verification and Troubleshooting Checklist
@@ -218,7 +241,7 @@ Go to **Debugger -> Process options...**:
      ss -tulpn | grep 23946   # Linux
      netstat -ano | findstr 23946 # Windows
      ```
-   - Verify UTM port forwarding rule is saved and active.
+   - Verify UTM port forwarding rule is saved and active, and that the NIC is in Emulated VLAN mode. Shared Network ignores port forwards.
    - For Docker, ensure `-p 23946:23946` was specified at `docker run` time.
 2. **Permission Denied / Cannot Attach**:
    - Ensure `--cap-add=SYS_PTRACE` was provided for Docker.

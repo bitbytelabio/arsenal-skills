@@ -8,7 +8,7 @@
       "id": "osquery",
       "name": "osquery",
       "category": "telemetry_monitoring",
-      "description": "SQL-powered operating system instrumentation, monitoring, and analytics agent.",
+      "description": "SQL-powered OS instrumentation. Debian/Ubuntu use the pkg.osquery.io repo with a dearmored key in /etc/apt/keyrings; Ubuntu 24.04 apt ignores ASCII keys in trusted.gpg.d.",
       "apt_package": null,
       "dnf_package": null,
       "pacman_package": null,
@@ -98,10 +98,73 @@
       ]
     },
     {
+      "id": "openjdk",
+      "name": "OpenJDK 21",
+      "category": "system_utilities",
+      "description": "Java runtime for Ghidra 11.x/12.x.",
+      "apt_package": "openjdk-21-jdk",
+      "dnf_package": "java-21-openjdk-devel",
+      "pacman_package": "jdk21-openjdk",
+      "binary_path": "/usr/bin/java",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "java",
+        "ghidra"
+      ]
+    },
+    {
+      "id": "nodejs",
+      "name": "Node.js",
+      "category": "system_utilities",
+      "description": "Node.js runtime for npm-based MCP servers.",
+      "apt_package": "nodejs",
+      "dnf_package": "nodejs",
+      "pacman_package": "nodejs",
+      "binary_path": "/usr/bin/node",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "node",
+        "npm"
+      ]
+    },
+    {
+      "id": "npm",
+      "name": "npm",
+      "category": "system_utilities",
+      "description": "Node package manager. Ubuntu ships it separately from nodejs; computer-use-mcp needs it.",
+      "apt_package": "npm",
+      "dnf_package": "npm",
+      "pacman_package": "npm",
+      "binary_path": "/usr/bin/npm",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "node",
+        "npm"
+      ]
+    },
+    {
+      "id": "unzip",
+      "name": "unzip",
+      "category": "system_utilities",
+      "description": "Archive extractor used to unpack the Ghidra release zip.",
+      "apt_package": "unzip",
+      "dnf_package": "unzip",
+      "pacman_package": "unzip",
+      "binary_path": "/usr/bin/unzip",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "archive"
+      ]
+    },
+    {
       "id": "ghidra",
       "name": "NSA Ghidra",
       "category": "debugging_disassembly",
-      "description": "Comprehensive software reverse engineering suite with decompiler and headless analyzer.",
+      "description": "NSA Ghidra SRE suite. Installed from the latest GitHub release zip into /opt/ghidra_<version> with /opt/ghidra pointing at it. Needs openjdk.",
       "apt_package": null,
       "dnf_package": null,
       "pacman_package": null,

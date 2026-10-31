@@ -10,7 +10,8 @@ Automated provisioning for Linux guest virtual machines (Debian/Ubuntu, Fedora/R
    - Install `openssh-server` on guest: `sudo apt update && sudo apt install -y openssh-server`.
    - Ensure the SSH daemon is running and user has `sudo` privileges.
    - Recommended: Configure SSH key-based authentication (`~/.ssh/authorized_keys`).
-4. **Ansible**: Installed on host (`brew install ansible`, `sudo apt install ansible`, or `uv pip install ansible`).
+4. **Ansible**: Installed on host (`brew install ansible` or `uv tool install ansible`). Run `uv run scripts/setup_vm.py deps --install` once for the collections.
+5. **UTM networking**: The Ubuntu cloud image got no DHCP lease on UTM 5 Shared Network. Use Emulated VLAN with a port forward (host `127.0.0.1:2222` -> guest 22) and generate the inventory with `--host 127.0.0.1 --port 2222`. A cloud image has only a serial console, so the UTM window shows "Display output is not active"; use SSH.
 
 ---
 
@@ -75,8 +76,13 @@ The playbook performs:
 1. **Dynamic Analysis Hardening**: Disables Yama ptrace restrictions (`sysctl kernel.yama.ptrace_scope = 0`) to allow `gdb`, `strace`, and debuggers to attach to target processes.
 2. **Directory Staging**: Prepares `/opt/ida_dbgsrv` and `/etc/osquery`.
 3. **Firewall Rules**: Opens port `23946/tcp` (IDA remote debugger) and port `4517/tcp` (Computer Use MCP) via UFW (Debian/Ubuntu) or firewalld (Fedora).
-4. **Package Installations**: Maps catalog entries to distro package managers (`apt`, `dnf`, or `pacman`).
-5. **Telemetry Daemon**: Stages a baseline `osquery.conf` and enables `osqueryd`.
+4. **Package Installations**: Maps catalog entries to `apt`, `dnf`, or `pacman`, asks the package index which names exist, installs those in one call, and lists the rest. One missing name no longer fails the batch. `nodejs`, `npm`, `openjdk-21-jdk`, and `unzip` are catalog entries so npm tools and Ghidra work.
+5. **osquery**: Adds pkg.osquery.io with a dearmored key in `/etc/apt/keyrings` and `signed-by`. Ubuntu 24.04 apt ignores an ASCII key in `trusted.gpg.d`.
+6. **Ghidra**: Downloads the latest release zip from GitHub into `/opt/ghidra_<version>_PUBLIC` and links `/opt/ghidra`.
+7. **IDA debug servers**: Copies `armlinux_server*` (ARM64) or `linux_server*` (x86_64) into `/opt/ida_dbgsrv`.
+8. **Telemetry Daemon**: Stages a baseline `osquery.conf` and enables `osqueryd`, then prints `found` and `missing` catalog tools.
+
+Verified on Ubuntu 24.04 ARM64 under UTM: `failed=0`, all 22 enabled tools found.
 
 ---
 

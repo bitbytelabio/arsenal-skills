@@ -31,7 +31,7 @@ The gate passes only when:
 If no target is connected, the state is `offline`/`unauthorized`, or root is not confirmed, stop dynamic analysis and invoke the tool-setup bridge:
 
 ```bash
-python3 scripts/setup_android_emulator.py setup-all
+uv run scripts/setup_android_emulator.py setup-all
 adb wait-for-device
 adb shell "su -c id"
 ```
@@ -40,14 +40,14 @@ adb shell "su -c id"
 
 ```bash
 sdkmanager "system-images;android-36;google_apis_playstore;arm64-v8a"
-python3 scripts/setup_android_emulator.py setup-all
+uv run scripts/setup_android_emulator.py setup-all
 ```
 
 Install the mitmproxy CA into the rooted system trust path through the real tool-setup subcommand:
 
 ```bash
-python3 scripts/setup_proxy_ca.py install-android
-python3 scripts/setup_proxy_ca.py set-android-proxy
+uv run scripts/setup_proxy_ca.py install-android
+uv run scripts/setup_proxy_ca.py set-android-proxy
 ```
 
 On recent read-only Android images, `install-android` uses a KernelSU/Magisk module or a mount overlay instead of assuming `adb remount` can modify EROFS.
@@ -86,7 +86,7 @@ frida-ps -H 127.0.0.1:27042 -ai
 For a booted iOS Simulator, install the proxy CA with:
 
 ```bash
-python3 scripts/setup_proxy_ca.py install-ios-sim
+uv run scripts/setup_proxy_ca.py install-ios-sim
 ```
 
 For a `vphone-cli` guest, transfer the same CA profile to the guest, install it, and enable full trust in **Settings > General > About > Certificate Trust Settings**. The simulator keychain command does not modify the guest keychain.

@@ -3,256 +3,302 @@
   hosts: windows_vms
   gather_facts: true
 
+  # ida_dbgsrv_src is passed by setup_vm.py run-playbook (extra var). Do not
+  # define it under vars: here; "x: '{{ x | default() }}'" is a recursive
+  # template and fails as soon as the extra var is absent.
   vars:
     tools_catalog_file: "{{ playbook_dir }}/windows_tools.json"
     tools_catalog: "{{ lookup('file', tools_catalog_file) | from_json }}"
+    enabled_tools: "{{ tools_catalog.tools | selectattr('enabled', 'equalto', true) | list }}"
+    enabled_ids: "{{ enabled_tools | map(attribute='id') | list }}"
     ida_remote_port: 23946
     ida_staging_dir: "C:\\Tools\\ida_dbgsrv"
-    ida_dbgsrv_src: "{{ ida_dbgsrv_src | default('') }}"
+    ida_windows_servers:
+      - win64_remote.exe
+      - win32_remote32.exe
     osquery_config_dir: "C:\\Program Files\\osquery"
+    defender_exclusions:
+      - "C:\\Tools"
+      - "C:\\Workspace"
+      - "C:\\ProgramData\\chocolatey\\lib"
 
   tasks:
     - name: Display Windows system facts
       ansible.builtin.debug:
-        msg: "Connected to {{ ansible_facts['nodename'] | default(inventory_hostname) }} (Windows {{ ansible_facts['os_name'] | default('Windows') }} build {{ ansible_facts['os_build'] | default(ansible_facts['distribution_version'] | default('unknown')) }})"
+        msg: "Connected to {{ ansible_facts['nodename'] | default(inventory_hostname) }} (Windows {{ ansible_facts['os_name'] | default('Windows') }} build {{ ansible_facts['os_build'] | default(ansible_facts['distribution_version'] | default('unknown')) }}, {{ ansible_facts['architecture'] | default('?') }})"
 
+    - name: Ensure lab directories exist
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "C:\\Tools"
+        - "C:\\Workspace"
+        - "{{ ida_staging_dir }}"
+
+    # Tamper Protection blocks turning Defender off from a script, but local
+    # admins can still add exclusions. Without them Defender quarantines
+    # debuggers and unpackers right after Chocolatey extracts them.
+    - name: Add Defender exclusions for tool and sample folders
+      ansible.windows.win_powershell:
+        script: |
+          param([string[]]$Paths)
+          $current = @((Get-MpPreference).ExclusionPath)
+          $Ansible.Changed = $false
+          foreach ($p in $Paths) {
+            if ($current -notcontains $p) {
+              Add-MpPreference -ExclusionPath $p
+              $Ansible.Changed = $true
+            }
+          }
+        parameters:
+          Paths: "{{ defender_exclusions }}"
+      ignore_errors: true
+
+    # --- IDA remote debug servers -------------------------------------------
+    - name: Check the IDA Windows debug servers on the controller
+      ansible.builtin.stat:
+        path: "{{ ida_dbgsrv_src }}/{{ item }}"
+      loop: "{{ ida_windows_servers }}"
+      register: ida_src_stat
+      delegate_to: localhost
+      become: false
+      when: ida_dbgsrv_src | default('') | length > 0
+
+    - name: Warn when no IDA debug server will be copied
+      ansible.builtin.debug:
+        msg: >-
+          IDA debug servers NOT copied. Run through 'setup_vm.py run-playbook'
+          or pass -e ida_dbgsrv_src=/path/to/IDA/dbgsrv
+          (found: {{ ida_src_stat.results | default([]) | selectattr('stat', 'defined') | selectattr('stat.exists') | map(attribute='item') | list }}).
+      when: >-
+        ida_dbgsrv_src | default('') | length == 0
+        or (ida_src_stat.results | selectattr('stat', 'defined') | selectattr('stat.exists') | list | length) == 0
+
+    - name: Copy IDA Windows remote debug servers from the controller
+      ansible.windows.win_copy:
+        src: "{{ ida_dbgsrv_src }}/{{ item.item }}"
+        dest: "{{ ida_staging_dir }}\\{{ item.item }}"
+      loop: "{{ ida_src_stat.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item | default('') }}"
+      when:
+        - ida_dbgsrv_src | default('') | length > 0
+        - item.stat is defined and item.stat.exists
+
+    # --- Firewall -------------------------------------------------------------
+    - name: Open inbound firewall ports for WinRM and the IDA debug server
+      community.windows.win_firewall_rule:
+        name: "{{ item.name }}"
+        description: "{{ item.desc }}"
+        localport: "{{ item.port }}"
+        action: allow
+        direction: in
+        protocol: tcp
+        profiles: [domain, private, public]
+        state: present
+        enabled: true
+      loop:
+        - { name: WinRM-HTTP-In, port: 5985, desc: "WinRM HTTP for Ansible" }
+        - { name: WinRM-HTTPS-In, port: 5986, desc: "WinRM HTTPS for Ansible" }
+        - { name: IDA-Pro-Remote-Debugger, port: "{{ ida_remote_port }}", desc: "IDA win64_remote.exe / win32_remote32.exe" }
+
+    # --- Packages -------------------------------------------------------------
     - name: Ensure Chocolatey package manager is installed
       chocolatey.chocolatey.win_chocolatey:
         name: chocolatey
         state: present
 
-    - name: Ensure base tools staging directory exists
-      ansible.windows.win_file:
-        path: "{{ ida_staging_dir }}"
-        state: directory
-
-    - name: Copy IDA Windows remote debug servers from the controller
-      ansible.windows.win_copy:
-        src: "{{ ida_dbgsrv_src }}/{{ item }}"
-        dest: "{{ ida_staging_dir }}\\{{ item }}"
-      loop:
-        - win64_remote.exe
-        - win32_remote32.exe
-      when: ida_dbgsrv_src | length > 0
-      failed_when: false
-
-    - name: Configure Windows Firewall rule for WinRM HTTP
-      community.windows.win_firewall_rule:
-        name: WinRM-HTTP-In
-        localport: 5985
-        action: allow
-        direction: in
-        protocol: tcp
-        state: present
-        enabled: true
-
-    - name: Configure Windows Firewall rule for WinRM HTTPS
-      community.windows.win_firewall_rule:
-        name: WinRM-HTTPS-In
-        localport: 5986
-        action: allow
-        direction: in
-        protocol: tcp
-        state: present
-        enabled: true
-
-    - name: Configure Windows Firewall rule for IDA Remote Debugger (win64_remote.exe)
-      community.windows.win_firewall_rule:
-        name: IDA-Pro-Remote-Debugger-x64
-        description: Inbound rule for IDA Pro win64_remote.exe debug server
-        localport: "{{ ida_remote_port }}"
-        action: allow
-        direction: in
-        protocol: tcp
-        state: present
-        enabled: true
-
-    - name: Ensure Node.js LTS is installed if tools require npm
-      chocolatey.chocolatey.win_chocolatey:
-        name: nodejs-lts
-        state: present
-      when: "(tools_catalog.tools | selectattr('enabled', 'defined') | selectattr('enabled', 'equalto', true) | selectattr('npm_package', 'defined') | rejectattr('npm_package', 'none') | rejectattr('npm_package', 'equalto', '') | list | length) > 0"
-    - name: Filter enabled tools that have a Chocolatey package defined
+    - name: Select enabled tools with a Chocolatey package
       ansible.builtin.set_fact:
-        choco_tools: "{{ tools_catalog.tools | selectattr('enabled', 'defined') | selectattr('enabled', 'equalto', true) | selectattr('choco_package', 'defined') | rejectattr('choco_package', 'none') | list }}"
+        choco_tools: "{{ enabled_tools | selectattr('choco_package', 'defined') | rejectattr('choco_package', 'none') | rejectattr('choco_package', 'equalto', '') | list }}"
 
-    - name: Install Chocolatey tools (standard packages)
+    # ignore_errors (not failed_when: false) keeps item.failed set, so the
+    # winget fallback below can see which packages did not install.
+    - name: Install Chocolatey packages
       chocolatey.chocolatey.win_chocolatey:
         name: "{{ item.choco_package }}"
         state: present
       loop: "{{ choco_tools }}"
-      when: item.choco_package not in ['wireshark']
-      register: choco_standard_install
-      failed_when: false
+      loop_control:
+        label: "{{ item.id }} ({{ item.choco_package }})"
+      register: choco_install
+      ignore_errors: true
 
-    - name: Install Wireshark with silent Npcap and loopback support arguments
-      chocolatey.chocolatey.win_chocolatey:
-        name: wireshark
-        state: present
-        package_params: "/loopback_support=yes"
-        install_args: "/S"
-      when: "'wireshark' in (choco_tools | map(attribute='choco_package') | list)"
-      register: wireshark_install
-      failed_when: false
-
-    - name: Fall back to winget when Chocolatey did not install the tool
-      ansible.windows.win_shell: >-
-        winget install --id {{ item.item.winget_id }} --exact --scope machine
-        --accept-package-agreements --accept-source-agreements --disable-interactivity
-      loop: "{{ choco_standard_install.results | default([]) }}"
-      when:
-        - item.skipped is not defined or not item.skipped
-        - item.rc | default(1) | int != 0
-        - item.item.winget_id | default('') | length > 0
-      failed_when: false
-
-    - name: Fall back to winget for Wireshark when Chocolatey did not install it
-      ansible.windows.win_shell: >-
-        winget install --id WiresharkFoundation.Wireshark --exact --scope machine
-        --accept-package-agreements --accept-source-agreements --disable-interactivity
-      when:
-        - wireshark_install is defined
-        - not (wireshark_install.skipped | default(false))
-        - wireshark_install.rc | default(1) | int != 0
-      failed_when: false
-
-    - name: Install tools that have a winget id and no Chocolatey package
-      ansible.windows.win_shell: >-
-        winget install --id {{ item.winget_id }} --exact --scope machine
-        --accept-package-agreements --accept-source-agreements --disable-interactivity
-      loop: "{{ tools_catalog.tools | selectattr('enabled', 'equalto', true) | list }}"
-      when:
-        - item.choco_package is none or item.choco_package == ''
-        - item.winget_id | default('') | length > 0
-      failed_when: false
-
-    - name: Filter enabled tools that have an npm package defined
+    - name: Queue winget installs (Chocolatey failures and winget-only tools)
       ansible.builtin.set_fact:
-        npm_tools: "{{ tools_catalog.tools | selectattr('enabled', 'defined') | selectattr('enabled', 'equalto', true) | selectattr('npm_package', 'defined') | rejectattr('npm_package', 'none') | rejectattr('npm_package', 'equalto', '') | list }}"
+        winget_queue: >-
+          {{
+            (choco_install.results | default([]) | select('failed') | map(attribute='item') | list)
+            + (enabled_tools
+               | rejectattr('choco_package', 'defined') | list)
+            + (enabled_tools
+               | selectattr('choco_package', 'defined')
+               | selectattr('choco_package', 'in', [none, '']) | list)
+          }}
+
+    # winget is an App Execution Alias and is not on PATH in a WinRM network
+    # logon. Resolve winget.exe from WindowsApps and run it through become
+    # (runas) so MSIX packages such as WinDbg register for the interactive user.
+    - name: Install queued tools with winget
+      ansible.windows.win_powershell:
+        script: |
+          param([string]$Id)
+          $winget = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
+          if (-not $winget) {
+            $winget = Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $winget) { throw "winget.exe not found. Install App Installer, then rerun." }
+          $out = & $winget install --id $Id --exact --source winget --silent `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          # -1978335189 (0x8A15002B): already installed, no newer version.
+          if ($code -eq -1978335189) { $Ansible.Changed = $false; return }
+          if ($code -ne 0) { throw "winget exit $code for ${Id}: $out" }
+        parameters:
+          Id: "{{ item.winget_id }}"
+      loop: "{{ winget_queue | selectattr('winget_id', 'defined') | rejectattr('winget_id', 'none') | rejectattr('winget_id', 'equalto', '') | list }}"
+      loop_control:
+        label: "{{ item.id }} ({{ item.winget_id }})"
+      become: true
+      become_method: runas
+      become_user: "{{ ansible_user }}"
+      vars:
+        ansible_become_password: "{{ ansible_password }}"
+      ignore_errors: true
+
+    - name: Register the Sysmon service with a baseline config
+      ansible.windows.win_powershell:
+        script: |
+          if (Get-Service -Name Sysmon64, Sysmon64a, Sysmon -ErrorAction SilentlyContinue) { $Ansible.Changed = $false; return }
+          $name = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'Sysmon64a.exe' } else { 'Sysmon64.exe' }
+          $roots = @("$env:ProgramData\chocolatey\lib\sysmon", "$env:LOCALAPPDATA\Microsoft\WinGet\Packages", "$env:ProgramFiles\WinGet\Packages", 'C:\Tools')
+          $exe = Get-ChildItem -Path $roots -Recurse -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $exe) { throw "$name not found; the sysmon package did not install." }
+          $config = 'C:\Tools\sysmonconfig.xml'
+          if (-not (Test-Path $config)) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -OutFile $config `
+                -Uri 'https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml'
+            } catch { Remove-Item $config -ErrorAction SilentlyContinue }
+          }
+          if (Test-Path $config) { & $exe -accepteula -i $config } else { & $exe -accepteula -i }
+          if ($LASTEXITCODE -ne 0) { throw "Sysmon install exit $LASTEXITCODE" }
+      when: "'sysmon' in enabled_ids"
+      ignore_errors: true
 
     - name: Install global npm packages for enabled tools
       ansible.windows.win_command: '"C:\Program Files\nodejs\npm.cmd" install -g {{ item.npm_package }}'
-      loop: "{{ npm_tools }}"
-      when: npm_tools | length > 0
+      loop: "{{ enabled_tools | selectattr('npm_package', 'defined') | rejectattr('npm_package', 'none') | rejectattr('npm_package', 'equalto', '') | list }}"
+      loop_control:
+        label: "{{ item.npm_package }}"
+      ignore_errors: true
 
-    - name: Ensure Tools root directory exists
-      ansible.windows.win_file:
-        path: "C:\\Tools"
-        state: directory
+    # --- Computer Use MCP -----------------------------------------------------
+    - name: Configure Computer Use MCP server
+      when: "'computer-use-mcp' in enabled_ids"
+      block:
+        - name: Deploy Computer Use MCP server management script
+          ansible.windows.win_copy:
+            src: "start_computer_use_server.ps1"
+            dest: "C:\\Tools\\start_computer_use_server.ps1"
 
-    - name: Deploy Computer Use MCP server management script
-      ansible.windows.win_copy:
-        src: "start_computer_use_server.ps1"
-        dest: "C:\\Tools\\start_computer_use_server.ps1"
-      when: "'computer-use-mcp' in (tools_catalog.tools | selectattr('enabled', 'equalto', true) | map(attribute='id') | list)"
+        - name: Ensure Windows Firewall allows Computer Use MCP server inbound (port 4517)
+          community.windows.win_firewall_rule:
+            name: "Computer-Use-MCP-Server-In"
+            localport: 4517
+            action: allow
+            direction: in
+            protocol: tcp
+            state: present
+            enabled: true
 
-    - name: Ensure Windows Firewall allows Computer Use MCP server inbound (port 4517)
-      community.windows.win_firewall_rule:
-        name: "Computer-Use-MCP-Server-In"
-        localport: 4517
-        action: allow
-        direction: in
-        protocol: tcp
-        state: present
-        enabled: true
-      when: "'computer-use-mcp' in (tools_catalog.tools | selectattr('enabled', 'equalto', true) | map(attribute='id') | list)"
-    - name: Configure netsh interface portproxy for Computer Use MCP (0.0.0.0:4517 -> 127.0.0.1:4517)
-      ansible.windows.win_powershell:
-        script: |
-          $existing = netsh interface portproxy show v4tov4 | Out-String
-          if ($existing -notmatch "0\.0\.0\.0\s+4517\s+127\.0\.0\.1\s+4517") {
-            netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=4517 connectaddress=127.0.0.1 connectport=4517
-            $Ansible.Changed = $true
-          } else {
-            $Ansible.Changed = $false
-          }
-      when: "'computer-use-mcp' in (tools_catalog.tools | selectattr('enabled', 'equalto', true) | map(attribute='id') | list)"
-
-    - name: Register Scheduled Task for Computer Use MCP Server on user logon
-      community.windows.win_scheduled_task:
-        name: "ComputerUseMcpServer"
-        description: "Starts @zavora-ai/computer-use-mcp console server on port 4517 upon interactive desktop logon"
-        actions:
-          - path: "powershell.exe"
-            arguments: "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Tools\\start_computer_use_server.ps1 -Action start -Port 4517"
-        triggers:
-          - type: logon
-        username: "{{ ansible_user | default('Administrator') }}"
-        logon_type: interactive_token
-        state: present
-        enabled: true
-      when: "'computer-use-mcp' in (tools_catalog.tools | selectattr('enabled', 'equalto', true) | map(attribute='id') | list)"
-
-    - name: Ensure osquery configuration directory exists
-      ansible.windows.win_file:
-        path: "{{ osquery_config_dir }}"
-        state: directory
-      when: "'osquery' in (choco_tools | map(attribute='id') | list)"
-
-    - name: Check if osquery.conf exists
-      ansible.windows.win_stat:
-        path: "{{ osquery_config_dir }}\\osquery.conf"
-      register: osquery_conf_stat
-      when: "'osquery' in (choco_tools | map(attribute='id') | list)"
-
-    - name: Create baseline osquery.conf if not present
-      ansible.windows.win_copy:
-        dest: "{{ osquery_config_dir }}\\osquery.conf"
-        content: |
-          {
-            "options": {
-              "config_plugin": "filesystem",
-              "logger_plugin": "filesystem",
-              "logger_path": "C:\\ProgramData\\osquery\\log",
-              "schedule_splay_percent": 10
-            },
-            "schedule": {
-              "system_info": {
-                "query": "SELECT hostname, cpu_brand, physical_memory FROM system_info;",
-                "interval": 3600
-              },
-              "process_snapshot": {
-                "query": "SELECT pid, name, path, cmdline, parent FROM processes;",
-                "interval": 300
-              },
-              "listening_ports": {
-                "query": "SELECT pid, port, protocol, address FROM listening_ports;",
-                "interval": 300
+        - name: Configure netsh interface portproxy for Computer Use MCP (0.0.0.0:4517 -> 127.0.0.1:4517)
+          ansible.windows.win_powershell:
+            script: |
+              $existing = netsh interface portproxy show v4tov4 | Out-String
+              if ($existing -notmatch "0\.0\.0\.0\s+4517\s+127\.0\.0\.1\s+4517") {
+                netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=4517 connectaddress=127.0.0.1 connectport=4517
+                $Ansible.Changed = $true
+              } else {
+                $Ansible.Changed = $false
               }
-            }
-          }
-      when:
-        - "'osquery' in (choco_tools | map(attribute='id') | list)"
-        - not osquery_conf_stat.stat.exists
 
-    - name: Check if osqueryd service exists
-      ansible.windows.win_service:
-        name: osqueryd
-      register: osqueryd_service_status
-      failed_when: false
-      when: "'osquery' in (choco_tools | map(attribute='id') | list)"
+        - name: Register Scheduled Task for Computer Use MCP Server on user logon
+          community.windows.win_scheduled_task:
+            name: "ComputerUseMcpServer"
+            description: "Starts @zavora-ai/computer-use-mcp console server on port 4517 upon interactive desktop logon"
+            actions:
+              - path: "powershell.exe"
+                arguments: "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Tools\\start_computer_use_server.ps1 -Action start -Port 4517"
+            triggers:
+              - type: logon
+            username: "{{ ansible_user | default('Administrator') }}"
+            logon_type: interactive_token
+            state: present
+            enabled: true
 
-    - name: Fallback register osqueryd service if not registered by Chocolatey
-      ansible.windows.win_command: >-
-        "C:\Program Files\osquery\osqueryd.exe" --install --config_path="{{ osquery_config_dir }}\osquery.conf"
-      when:
-        - "'osquery' in (choco_tools | map(attribute='id') | list)"
-        - osqueryd_service_status.exists is defined
-        - not osqueryd_service_status.exists
+    # --- osquery --------------------------------------------------------------
+    - name: Configure the osqueryd service
+      when: "'osquery' in enabled_ids"
+      ignore_errors: true
+      block:
+        - name: Ensure osquery configuration directory exists
+          ansible.windows.win_file:
+            path: "{{ osquery_config_dir }}"
+            state: directory
 
-    - name: Ensure osqueryd service is registered and running
-      ansible.windows.win_service:
-        name: osqueryd
-        start_mode: auto
-        state: started
-      when: "'osquery' in (choco_tools | map(attribute='id') | list)"
+        - name: Create baseline osquery.conf if not present
+          ansible.windows.win_copy:
+            dest: "{{ osquery_config_dir }}\\osquery.conf"
+            force: false
+            content: |
+              {
+                "options": {
+                  "config_plugin": "filesystem",
+                  "logger_plugin": "filesystem",
+                  "logger_path": "C:\\ProgramData\\osquery\\log",
+                  "schedule_splay_percent": 10
+                },
+                "schedule": {
+                  "system_info": {
+                    "query": "SELECT hostname, cpu_brand, physical_memory FROM system_info;",
+                    "interval": 3600
+                  },
+                  "process_snapshot": {
+                    "query": "SELECT pid, name, path, cmdline, parent FROM processes;",
+                    "interval": 300
+                  },
+                  "listening_ports": {
+                    "query": "SELECT pid, port, protocol, address FROM listening_ports;",
+                    "interval": 300
+                  }
+                }
+              }
+
+        - name: Check if osqueryd service exists
+          ansible.windows.win_service_info:
+            name: osqueryd
+          register: osqueryd_service_info
+
+        - name: Register osqueryd service if the package did not
+          ansible.windows.win_command: >-
+            "C:\Program Files\osquery\osqueryd\osqueryd.exe" --install --config_path="{{ osquery_config_dir }}\osquery.conf"
+          when: not osqueryd_service_info.exists
+
+        - name: Ensure osqueryd service is running
+          ansible.windows.win_service:
+            name: osqueryd
+            start_mode: auto
+            state: started
+
     - name: Configure System PATH environment variable for RE & forensic tools
       ansible.windows.win_path:
         elements:
           - "C:\\Program Files\\Wireshark"
           - "C:\\ProgramData\\chocolatey\\bin"
           - "C:\\Program Files\\osquery"
-          - "C:\\Program Files\\x64dbg\\release\\x64"
           - "C:\\ProgramData\\chocolatey\\lib\\x64dbg.portable\\tools\\release\\x64"
           - "C:\\radare2\\bin"
           - "C:\\Tools\\ida_dbgsrv"
@@ -262,17 +308,24 @@
         state: present
         scope: machine
 
+    # --- Verification ---------------------------------------------------------
+    # binary_path may contain %VARS% and wildcards; expand both in the guest.
     - name: Verify installed tool binaries
-      ansible.windows.win_stat:
-        path: "{{ (ansible_env.APPDATA + '\\npm\\computer-use-mcp.cmd') if item.id == 'computer-use-mcp' else item.binary_path }}"
-      loop: "{{ tools_catalog.tools | selectattr('enabled', 'equalto', true) | list }}"
-      register: tool_binary_check
-      ignore_errors: true
+      ansible.windows.win_powershell:
+        script: |
+          param([object[]]$Tools)
+          $Ansible.Changed = $false
+          foreach ($t in $Tools) {
+            $path = [Environment]::ExpandEnvironmentVariables([string]$t.binary_path)
+            $hit = Get-Item -Path $path -ErrorAction SilentlyContinue | Select-Object -First 1
+            [pscustomobject]@{ id = $t.id; path = $path; found = [bool]$hit }
+          }
+        parameters:
+          Tools: "{{ enabled_tools | map('dict2items') | map('selectattr', 'key', 'in', ['id', 'binary_path']) | map('items2dict') | list }}"
+      register: tool_verify
 
     - name: Summary report of provisioned tools
       ansible.builtin.debug:
-        msg: >-
-          Tool '{{ item.item.name }}' ({{ item.item.id }}):
-          {{ 'FOUND at ' + item.item.binary_path if item.stat is defined and item.stat.exists else 'NOT DETECTED (pending reboot or manual drop)' }}
-      loop: "{{ tool_binary_check.results }}"
-      when: item.item is defined
+        msg:
+          found: "{{ tool_verify.output | selectattr('found') | map(attribute='id') | list }}"
+          missing: "{{ tool_verify.output | rejectattr('found') | map(attribute='id') | list }}"

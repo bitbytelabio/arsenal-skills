@@ -191,8 +191,8 @@ Selecting the appropriate network mode depends on whether the sample requires in
 
 ### 3. Isolated / Host-Only Network (Malware Containment)
 - **Topology**: UTM Host-Only network. Guest has no route to the public internet or local LAN.
-- **Safety**: Prevents malware from contacting real C2 servers, scanning internal networks, or leaking host identifiers.
-- **Simulated Services**: Run `INetSim`, `fakedns`, or `mitmproxy` on the host to emulate DNS and HTTP C2 responses safely.
+- **Safety**: Prevents malware from contacting its real servers, scanning internal networks, or leaking host identifiers.
+- **Simulated Services**: Run `INetSim`, `fakedns`, or `mitmproxy` on the host to answer DNS and HTTP requests from the sample inside the lab. With mitmproxy, `--server-replay <capture> --set server_replay_extra=404` replays recorded responses and refuses everything else.
 
 ---
 

@@ -98,18 +98,18 @@ Pass criteria are an intended target in the `device` state, `uid=0(root)`, and K
 If the device is missing or unrooted:
 
 ```bash
-python3 scripts/setup_android_emulator.py setup-all
+uv run scripts/setup_android_emulator.py setup-all
 adb wait-for-device
 adb shell "su -c id"
-python3 scripts/setup_proxy_ca.py install-android
-python3 scripts/setup_proxy_ca.py set-android-proxy
+uv run scripts/setup_proxy_ca.py install-android
+uv run scripts/setup_proxy_ca.py set-android-proxy
 ```
 
 The tool-setup workflow selects an installed official Google Play ARM64 image, downloads the matching KernelSU GKI and `KernelSU_Next_*.apk`, backs up and replaces `kernel-ranchu`, cold-boots, installs the manager, and verifies `uid=0(root)`. If the image is not installed:
 
 ```bash
 sdkmanager "system-images;android-36;google_apis_playstore;arm64-v8a"
-python3 scripts/setup_android_emulator.py setup-all
+uv run scripts/setup_android_emulator.py setup-all
 ```
 
 ### iOS
@@ -139,7 +139,7 @@ frida-ps -H 127.0.0.1:27042 -ai
 This path uses the 112 jailbreak patches and provides root SSH on port 2222, Sileo, TrollStore, and guest `frida-server`. For a booted iOS Simulator:
 
 ```bash
-python3 scripts/setup_proxy_ca.py install-ios-sim
+uv run scripts/setup_proxy_ca.py install-ios-sim
 ```
 
 The research VM has a separate keychain. Transfer the CA profile to the guest, install it, and enable full trust in **Settings > General > About > Certificate Trust Settings**.

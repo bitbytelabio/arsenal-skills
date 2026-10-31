@@ -8,7 +8,7 @@
 
 | Artifact / Research Objective | Primary Tool | Secondary / Fallback | Reference & Implementation Route |
 |---|---|---|---|
-| **Headless Native Decompilation (PE/ELF/Mach-O)** | IDA Pro (OMP native `xd://ida` / Official Hex-Rays `ida-mcp`) | Ghidra via REA (`rea-agents`), Binary Ninja | [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md) |
+| **Headless Native Decompilation (PE/ELF/Mach-O)** | IDA Pro through the official Hex-Rays `ida-mcp` | Ghidra via REA (`rea-agents`), Binary Ninja | [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md) |
 | **Multi-Architecture Headless RE** | Ghidra via REA CLI/MCP (`rea-agents@6.8.0`) | IDA Pro, radare2 | [04-tool-usage/rea-ghidra.md](04-tool-usage/rea-ghidra.md) |
 | **Dynamic Binary Instrumentation (DBI)** | Frida (`frida-tools` CLI / REA Frida) | `frida-trace`, QEMU trace | [04-tool-usage/frida.md](04-tool-usage/frida.md) & [02-dynamic-instrumentation/frida-hooking.md](02-dynamic-instrumentation/frida-hooking.md) |
 | **Apple Firmware & iOS Binaries** | `blacktop/ipsw` & `vphone-cli` Research VM | IDA Pro, `class-dump` | [04-tool-usage/ipsw.md](04-tool-usage/ipsw.md) & [01-static-architectures/mobile-ios.md](01-static-architectures/mobile-ios.md) |
@@ -45,8 +45,7 @@ Autonomous agents operate under strict constraints regarding user interaction, s
 
 ### Headless Execution (Autonomous Agent Primary Mode)
 - **Hex-Rays IDA Pro 9.x**:
-  - Run via OMP native integration (`xd://ida`) using headless database daemons (`omp.ida.<id>`), instant `read` views (`read bin:main`), and structured mutations (`write xd://ida`).
-  - Run via official Hex-Rays MCP server (`ida-mcp` via stdio or streamable HTTP).
+  - Run only through the official Hex-Rays MCP server (`ida-mcp` via stdio or streamable HTTP): `open_database`, then IDAPython or `ida-domain` code in `execute_python`.
   - Automate batch tasks using IDAPython in headless mode: `ida -A -S"script.py" target.bin`.
   - See detailed workflows in [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md).
 - **Ghidra**:
@@ -75,22 +74,14 @@ Autonomous agents operate under strict constraints regarding user interaction, s
 
 ## Tool Capabilities & Invocation Reference
 
-### 1. IDA Pro (OMP Native `xd://ida` & Official Hex-Rays `ida-mcp`)
-- **Capabilities**: Industry-standard decompilation across x86, x64, ARM, ARM64, MIPS, PowerPC; FLIRT library signatures; full type propagation; remote debugging through `linux_server64` / `win64_remote.exe`.
-- **Primary Tool Reference**: [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md)
-- **OMP Native Invocations (`read` views & `xd://ida` mutations)**:
-  - Instant pseudocode: `read bin:main`
-  - Instant disassembly: `read bin:sub_401000:asm`
-  - Symbol & string triage: `read bin:imports`, `read bin:exports`, `read bin:strings`
-  - Cross-references: `read bin:xrefs:sub_401000`
-  - Structured mutations via `write xd://ida`:
-    - `{"action": "rename", "address": "0x401000", "name": "decrypt_payload"}`
-    - `{"action": "set_type", "address": "0x401000", "decl": "int __fastcall decrypt_payload(const uint8_t *src, size_t len)"}`
-    - `{"action": "comment", "address": "0x401000", "comment": "Main decryptor", "repeatable": true}`
-    - `{"action": "save"}` / `{"action": "close", "save": true}`
-- **Official Hex-Rays MCP Server (`ida-mcp`)**:
-  - Stdio transport: `ida-mcp stdio --agent=omp-re --idle-timeout=900 /path/to/binary_or_idb`
-  - Streamable HTTP transport: `ida-mcp http --host 127.0.0.1 --port 8737 /path/to/target.i64`
+### 1. IDA Pro (official Hex-Rays `ida-mcp`)
+- **Capabilities**: Industry-standard decompilation across x86, x64, ARM, ARM64, MIPS, PowerPC; FLIRT library signatures; full type propagation; remote debugging through `linux_server`, `armlinux_server`, `mac_server_arm`, and `win64_remote.exe`.
+- **Primary Tool Reference**: [04-tool-usage/ida-pro.md](04-tool-usage/ida-pro.md); debugger sessions: [04-tool-usage/ida-mcp-remote-debugging.md](04-tool-usage/ida-mcp-remote-debugging.md)
+- **Tools**: `open_database`, `execute_python`, `reference`, `list_databases`, `save_database`, `close_database`. Pseudocode, disassembly, strings, xrefs, renames, types, and comments are all IDAPython or `ida-domain` code inside `execute_python`; call `reference(query)` before guessing an `ida-domain` API.
+- **Transports**:
+  - Stdio: `ida-mcp stdio --agent=re-agent --idle-timeout=900 --database /path/to/binary_or_idb`
+  - Streamable HTTP: `ida-mcp http --host 127.0.0.1 --port 8737 --database /path/to/target.i64`
+
 ### 2. REA Ghidra Multi-Architecture Suite (`rea-agents`)
 - **Capabilities**: Automated headless decompilation, specialized binary layout inspection (`inspect-go-binary`, `inspect-rust-binary`, `inspect-il2cpp-metadata`), and JavaScript/Electron source recovery.
 - **Primary Tool Reference**: [04-tool-usage/rea-ghidra.md](04-tool-usage/rea-ghidra.md)

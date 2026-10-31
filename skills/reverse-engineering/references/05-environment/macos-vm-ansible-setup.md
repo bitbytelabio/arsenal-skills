@@ -55,8 +55,11 @@ uv run scripts/setup_vm.py generate-inventory \
   --os macos \
   --host 192.168.64.30 \
   --user analyst \
-  --password labpassword
+  --password labpassword \
+  --become-password labpassword
 ```
+
+The playbook needs sudo for Command Line Tools, Homebrew, PF, and pkg-based casks. Pass `--become-password` unless the user already has NOPASSWD sudo.
 
 This writes `ansible/inventory_macos.ini`.
 
@@ -75,10 +78,11 @@ uv run scripts/setup_vm.py run-playbook --os macos -v
 ```
 
 The playbook performs:
-1. **Directory Staging**: Prepares `/opt/ida_dbgsrv` owned by the user.
+0. **Command Line Tools bootstrap**: On a fresh guest `/usr/bin/python3` is only an installer stub, so fact gathering would fail. A first play uses `raw` to install CLT through `softwareupdate`, retrying twice if Apple's server does not answer, then the main play gathers facts.
+1. **Directory Staging**: Prepares `/opt/ida_dbgsrv` owned by the user and copies `mac_server_arm` (or `mac_server`) from the host's IDA `dbgsrv` folder. `DevToolsSecurity -enable` allows debugging without a prompt per attach.
 2. **Packet Filter Firewall**: Deploys `/etc/pf.anchors/com.re.tools` and loads PF rules to allow port `23946` (IDA debug server) and `4517` (Computer Use MCP).
-3. **Homebrew Bootstrap**: Verifies or bootstraps Homebrew non-interactively if absent, configuring shell environment in `~/.zprofile`.
-4. **Formula & Cask Installations**: Installs reverse engineering formulae (`radare2`, `wireshark`, `ipsw`, `jtool2`, `yara`, `uv`, etc.) and casks (`ghidra`, `osquery`).
+3. **Homebrew Bootstrap**: Installs Homebrew non-interactively if absent. The installer and pkg casks call sudo without a TTY, so the play adds a temporary NOPASSWD rule in `/etc/sudoers.d/zz-ansible-homebrew` and removes it in an `always` block.
+4. **Formula & Cask Installations**: Installs each formula and cask separately so one failure does not skip the rest. Ghidra is a cask (`ghidra`) and needs the `temurin@21` cask. `node` provides npm for `@zavora-ai/computer-use-mcp`.
 5. **Telemetry Daemon**: Stages a baseline `osquery.conf` in `/var/osquery/`.
 
 ---

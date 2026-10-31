@@ -1,50 +1,57 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pyelftools>=0.31",
+# ]
+# ///
 """Deterministic, read-only ELF reconnaissance for static analysis.
 
 Never executes, loads, emulates, or debugs the target and never contacts
-anything it contains. Reads file bytes only. Standard library only.
+anything it contains. Reads file bytes only; headers, sections, segments, and
+symbols are parsed with pyelftools.
 
 Usage:
-  python3 elf_triage.py target.bin
-  python3 elf_triage.py target.bin --find '^(main|decrypt_payload|key)$'
-  python3 elf_triage.py target.bin --dump encrypted_payload,key
-  python3 elf_triage.py target.bin --xor encrypted_payload --key key
-  python3 elf_triage.py target.bin --xor encrypted_payload --key-hex deadbeef...
+  uv run scripts/elf_triage.py target.bin
+  uv run scripts/elf_triage.py target.bin --find '^(main|decrypt_payload|key)$'
+  uv run scripts/elf_triage.py target.bin --dump encrypted_payload,key
+  uv run scripts/elf_triage.py target.bin --xor encrypted_payload --key key
+  uv run scripts/elf_triage.py target.bin --xor encrypted_payload --key-hex deadbeef...
 
 Exit codes: 0 success, 2 unreadable/not ELF/missing object.
 """
 
 import argparse
 import collections
+import io
 import math
 import re
-import struct
 import sys
 
-ET = {1: "REL", 2: "EXEC (non-PIE)", 3: "DYN (PIE/shared)", 4: "CORE"}
-MACH = {0x03: "i386", 0x28: "ARM", 0x3E: "x86-64", 0xB7: "AArch64"}
-PT = {
-    1: "LOAD",
-    2: "DYNAMIC",
-    3: "INTERP",
-    6: "PHDR",
-    7: "TLS",
-    0x6474E550: "GNU_EH_FRAME",
-    0x6474E551: "GNU_STACK",
-    0x6474E552: "GNU_RELRO",
+from elftools.common.exceptions import ELFError
+from elftools.elf.elffile import ELFFile
+from elftools.elf.sections import SymbolTableSection
+
+# pyelftools decodes enum fields to names ("ET_EXEC", "PT_LOAD", ...) and
+# leaves values it does not know as plain ints.
+ET = {"ET_REL": "REL", "ET_EXEC": "EXEC (non-PIE)", "ET_DYN": "DYN (PIE/shared)", "ET_CORE": "CORE"}
+MACH = {
+    "EM_386": "i386",
+    "EM_ARM": "ARM",
+    "EM_X86_64": "x86-64",
+    "EM_AARCH64": "AArch64",
+    "EM_MIPS": "MIPS",
+    "EM_PPC": "PowerPC",
+    "EM_PPC64": "PowerPC64",
+    "EM_RISCV": "RISC-V",
 }
-SHT = {
-    1: "PROGBITS",
-    2: "SYMTAB",
-    3: "STRTAB",
-    4: "RELA",
-    8: "NOBITS",
-    9: "REL",
-    11: "DYNSYM",
-    14: "INIT_ARRAY",
-    15: "FINI_ARRAY",
-}
-STT = {0: "NOTYPE", 1: "OBJECT", 2: "FUNC", 3: "SECTION", 4: "FILE", 6: "TLS"}
+
+
+def short(value, prefix):
+    """Display name for a decoded enum: drop the prefix, hex for unknown ints."""
+    if isinstance(value, str):
+        return value[len(prefix) :] if value.startswith(prefix) else value
+    return hex(value)
 
 
 def die(msg):
@@ -58,148 +65,86 @@ class Elf:
             self.data = open(path, "rb").read()
         except OSError as exc:
             die("cannot read %s: %s" % (path, exc))
-        d = self.data
-        if len(d) < 52 or d[:4] != b"\x7fELF":
+        if self.data[:4] != b"\x7fELF":
             die("%s is not an ELF file" % path)
-        if d[4] not in (1, 2) or d[5] not in (1, 2):
-            die("%s has an unsupported ELF class/encoding" % path)
-        self.bits = 64 if d[4] == 2 else 32
-        self.endian = "<" if d[5] == 1 else ">"
         self.path = path
-        e = self.endian
-        if self.bits == 64:
-            (
-                self.e_type,
-                self.e_machine,
-                _,
-                self.entry,
-                self.phoff,
-                self.shoff,
-                _,
-                _,
-                self.phentsize,
-                self.phnum,
-                self.shentsize,
-                self.shnum,
-                self.shstrndx,
-            ) = struct.unpack_from(e + "HHIQQQIHHHHHH", d, 16)
-        else:
-            (
-                self.e_type,
-                self.e_machine,
-                _,
-                self.entry,
-                self.phoff,
-                self.shoff,
-                _,
-                _,
-                self.phentsize,
-                self.phnum,
-                self.shentsize,
-                self.shnum,
-                self.shstrndx,
-            ) = struct.unpack_from(e + "HHIIIIIHHHHHH", d, 16)
-        self.sections = self._sections()
-        self.phdrs = self._phdrs()
-        self.symtab = self._symbols()
+        try:
+            elf = ELFFile(io.BytesIO(self.data))
+            self.bits = elf.elfclass
+            self.little_endian = elf.little_endian
+            self.e_type = elf.header["e_type"]
+            self.e_machine = elf.header["e_machine"]
+            self.entry = elf.header["e_entry"]
+            self.sections = self._sections(elf)
+            self.phdrs = self._phdrs(elf)
+            self.symtab = self._symbols(elf)
+        except ELFError as exc:
+            die("%s is not a valid ELF file: %s" % (path, exc))
+        self.shnum = len(self.sections)
+        self.phnum = len(self.phdrs)
 
-    def _cstr(self, sec, rel):
-        if not sec:
-            return "?"
-        start = sec["offset"] + rel
-        if start < 0 or start >= len(self.data):
-            return "?"
-        end = self.data.find(b"\x00", start)
-        if end < 0:
-            end = len(self.data)
-        return self.data[start:end].decode("utf-8", "replace")
-
-    def _sections(self):
+    def _sections(self, elf):
         out = []
-        for i in range(self.shnum):
-            off = self.shoff + i * self.shentsize
-            if self.bits == 64:
-                vals = struct.unpack_from(self.endian + "IIQQQQIIQQ", self.data, off)
-            else:
-                vals = struct.unpack_from(self.endian + "IIIIIIIIII", self.data, off)
-            name, typ, flags, addr, offset, size, link, info, align, entsize = vals
+        for sec in elf.iter_sections():
+            h = sec.header
             out.append(
                 {
-                    "name": name,
-                    "type": typ,
-                    "flags": flags,
-                    "addr": addr,
-                    "offset": offset,
-                    "size": size,
-                    "link": link,
-                    "info": info,
-                    "align": align,
-                    "entsize": entsize,
-                }
-            )
-        shstr = out[self.shstrndx] if 0 <= self.shstrndx < len(out) else None
-        for sec in out:
-            sec["sname"] = self._cstr(shstr, sec["name"])
-        return out
-
-    def _phdrs(self):
-        out = []
-        for i in range(self.phnum):
-            off = self.phoff + i * self.phentsize
-            if self.bits == 64:
-                typ, flags, offset, vaddr, paddr, filesz, memsz, align = struct.unpack_from(
-                    self.endian + "IIQQQQQQ", self.data, off
-                )
-            else:
-                typ, offset, vaddr, paddr, filesz, memsz, flags, align = struct.unpack_from(
-                    self.endian + "IIIIIIII", self.data, off
-                )
-            out.append(
-                {
-                    "type": typ,
-                    "flags": flags,
-                    "offset": offset,
-                    "vaddr": vaddr,
-                    "filesz": filesz,
-                    "memsz": memsz,
+                    "sname": sec.name,
+                    "type": h["sh_type"],
+                    "flags": h["sh_flags"],
+                    "addr": h["sh_addr"],
+                    "offset": h["sh_offset"],
+                    "size": h["sh_size"],
                 }
             )
         return out
 
-    def _symbols(self):
-        symtab = next((s for s in self.sections if s["type"] == 2), None)
-        if not symtab or not symtab["entsize"]:
+    def _phdrs(self, elf):
+        out = []
+        for seg in elf.iter_segments():
+            h = seg.header
+            out.append(
+                {
+                    "type": h["p_type"],
+                    "flags": h["p_flags"],
+                    "offset": h["p_offset"],
+                    "vaddr": h["p_vaddr"],
+                    "filesz": h["p_filesz"],
+                    "memsz": h["p_memsz"],
+                }
+            )
+        return out
+
+    def _symbols(self, elf):
+        symtab = next(
+            (
+                s
+                for s in elf.iter_sections()
+                if s["sh_type"] == "SHT_SYMTAB" and isinstance(s, SymbolTableSection)
+            ),
+            None,
+        )
+        if not symtab or not symtab["sh_entsize"]:
             return []
-        strtab = self.sections[symtab["link"]] if symtab["link"] < len(self.sections) else None
-        count = symtab["size"] // symtab["entsize"]
         out = []
-        for i in range(count):
-            off = symtab["offset"] + i * symtab["entsize"]
-            if self.bits == 64:
-                name, info, other, shndx, value, size = struct.unpack_from(
-                    self.endian + "IBBHQQ", self.data, off
-                )
-            else:
-                name, value, size, info, other, shndx = struct.unpack_from(
-                    self.endian + "IIIBBH", self.data, off
-                )
+        for sym in symtab.iter_symbols():
             out.append(
                 {
-                    "name": self._cstr(strtab, name),
-                    "type": info & 0xF,
-                    "bind": info >> 4,
-                    "shndx": shndx,
-                    "value": value,
-                    "size": size,
+                    "name": sym.name,
+                    "type": sym["st_info"]["type"],
+                    "bind": sym["st_info"]["bind"],
+                    # Special indexes (SHN_UNDEF/ABS/COMMON) decode to names.
+                    "shndx": sym["st_shndx"],
+                    "value": sym["st_value"],
+                    "size": sym["st_size"],
                 }
             )
         return out
 
     def section_for(self, sym):
-        idx = sym["shndx"]
-        if not (0 < idx < len(self.sections)):
+        if not self.file_backed(sym):
             die("symbol %r is not in a file-backed section" % sym["name"])
-        return self.sections[idx]
+        return self.sections[sym["shndx"]]
 
     def symbol_bytes(self, sym):
         sec = self.section_for(sym)
@@ -211,7 +156,7 @@ class Elf:
     def file_backed(self, sym):
         idx = sym["shndx"]
         # SHN_ABS, SHN_COMMON, and SHN_UNDEF are not section indexes.
-        return 0 < idx < len(self.sections)
+        return isinstance(idx, int) and 0 < idx < len(self.sections)
 
     def find(self, name=None, rx=None):
         out = []
@@ -248,8 +193,8 @@ def report(elf):
         "format      ELF%d %s %s, %s"
         % (
             elf.bits,
-            "LE" if elf.endian == "<" else "BE",
-            MACH.get(elf.e_machine, hex(elf.e_machine)),
+            "LE" if elf.little_endian else "BE",
+            MACH.get(elf.e_machine, short(elf.e_machine, "")),
             ET.get(elf.e_type, str(elf.e_type)),
         )
     )
@@ -259,7 +204,7 @@ def report(elf):
         % (elf.entry, elf.shnum, elf.phnum, len(elf.symtab))
     )
 
-    loads = [p for p in elf.phdrs if p["type"] == 1]
+    loads = [p for p in elf.phdrs if p["type"] == "PT_LOAD"]
     if loads:
         deltas = sorted({p["vaddr"] - p["offset"] for p in loads})
         print("LOAD deltas %s" % ", ".join("0x%x" % x for x in deltas))
@@ -281,9 +226,9 @@ def report(elf):
     for p in elf.phdrs:
         print(
             "  PH %-10s off=0x%-7x vaddr=0x%-8x filesz=0x%-7x flags=%d"
-            % (PT.get(p["type"], hex(p["type"])), p["offset"], p["vaddr"], p["filesz"], p["flags"])
+            % (short(p["type"], "PT_"), p["offset"], p["vaddr"], p["filesz"], p["flags"])
         )
-    stack = next((p for p in elf.phdrs if p["type"] == 0x6474E551), None)
+    stack = next((p for p in elf.phdrs if p["type"] == "PT_GNU_STACK"), None)
     if stack:
         print(
             "  GNU_STACK flags=%d%s"
@@ -310,7 +255,7 @@ def report(elf):
                     sec["addr"],
                     sec["offset"],
                     sec["size"],
-                    SHT.get(sec["type"], str(sec["type"])),
+                    short(sec["type"], "SHT_"),
                 )
             )
 
@@ -320,7 +265,7 @@ def report(elf):
         for sym in elf.find(name=name):
             print(
                 "  %-24s %-8s value=0x%-8x size=0x%x"
-                % (sym["name"], STT.get(sym["type"], "?"), sym["value"], sym["size"])
+                % (sym["name"], short(sym["type"], "STT_"), sym["value"], sym["size"])
             )
             seen = True
     if not seen:
@@ -344,7 +289,7 @@ def report_find(elf, pattern):
             "  %-36s %-8s %-10s value=0x%-8x size=0x%-4x file=0x%x"
             % (
                 sym["name"],
-                STT.get(sym["type"], "?"),
+                short(sym["type"], "STT_"),
                 sec["sname"],
                 sym["value"],
                 sym["size"],
@@ -356,7 +301,7 @@ def report_find(elf, pattern):
 def report_dump(elf, names):
     print("-- named OBJECT bytes --")
     for name in names:
-        syms = [s for s in elf.find(name=name) if s["type"] == 1]
+        syms = [s for s in elf.find(name=name) if s["type"] == "STT_OBJECT"]
         if not syms:
             print("  %-28s MISSING (not an OBJECT symbol)" % name)
             continue
@@ -377,7 +322,7 @@ def report_dump(elf, names):
 
 
 def report_xor(elf, blob_name, key_name, key_hex):
-    blobs = [s for s in elf.find(name=blob_name) if s["type"] == 1]
+    blobs = [s for s in elf.find(name=blob_name) if s["type"] == "STT_OBJECT"]
     if not blobs:
         die("no OBJECT symbol named %r" % blob_name)
     blob = blobs[0]
@@ -389,7 +334,7 @@ def report_xor(elf, blob_name, key_name, key_hex):
             die("bad --key-hex: %s" % exc)
         key_src = "--key-hex"
     else:
-        keys = [s for s in elf.find(name=key_name or "") if s["type"] == 1]
+        keys = [s for s in elf.find(name=key_name or "") if s["type"] == "STT_OBJECT"]
         if not keys:
             die("no OBJECT symbol named %r (pass --key-hex)" % key_name)
         key, key_off = elf.symbol_bytes(keys[0])

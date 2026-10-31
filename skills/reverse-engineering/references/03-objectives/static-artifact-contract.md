@@ -18,12 +18,12 @@ When to open this reference:
 
 ### Primary Analysis & Validation Scripts
 - **Format Triage & Address Mapping**:
-  - `python3 scripts/elf_triage.py <binary>`:
+  - `uv run scripts/elf_triage.py <binary>`:
     Inspects ELF/PE headers, entry points, segment load deltas (`vma - file_offset`), and NX/PIE flags.
-  - `python3 scripts/elf_symbols.py <binary>`:
+  - `uv run scripts/elf_symbols.py <binary>`:
     Separates user application symbols (`main`, custom handlers) from standard runtime glue code (`_start`, `__libc_csu_init`, CRT).
 - **Automated Validation**:
-  - `python3 scripts/check_deliverables.py --analysis <json_file> --evidence <evidence_file> --schema <schema_file>`:
+  - `uv run scripts/check_deliverables.py --analysis <json_file> --evidence <evidence_file> --schema <schema_file>`:
     Enforces mechanical schema compliance, non-empty fields, address format (`0x...`), and static tool command citations.
 - **Headless Decompilation**:
   - Headless IDA Pro MCP or Ghidra for extracting bounded procedure pseudocode.
@@ -146,7 +146,7 @@ The deliverable JSON must strictly adhere to the following field definitions:
 Execute the automated verification script before yielding:
 
 ```bash
-python3 scripts/check_deliverables.py \
+uv run scripts/check_deliverables.py \
   --analysis output/analysis.json \
   --evidence output/evidence.md \
   --schema analysis.schema.json

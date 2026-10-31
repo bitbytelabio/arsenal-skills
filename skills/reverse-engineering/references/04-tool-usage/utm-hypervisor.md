@@ -11,7 +11,7 @@ Engage this reference when:
 - Executing suspicious or untrusted binaries (Windows PE, Linux ELF) requiring an isolated, disposable sandbox environment.
 - Running live dynamic instrumentation or kernel tracing in a Windows 11 ARM64 or Ubuntu Linux ARM64 guest on Apple Silicon.
 - Establishing repeatable baseline states for reverse engineering using instant VM snapshots or differential disk trees.
-- Establishing secure, isolated network topologies (port-forwarding only, Host-Only, or air-gapped) for malware analysis to prevent command-and-control (C2) leakage.
+- Establishing secure, isolated network topologies (port-forwarding only, Host-Only, or air-gapped) for malware analysis so samples cannot reach their live servers.
 
 ---
 

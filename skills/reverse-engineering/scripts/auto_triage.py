@@ -2,6 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "lief>=0.17",
 #     "magika>=0.5.0",
 #     "python-magic>=0.4.27",
 # ]
@@ -18,11 +19,15 @@ import math
 import mimetypes
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import tarfile
 import zipfile
+
+import lief
+
+# LIEF logs parse warnings to stderr; triage output must stay clean JSON.
+lief.logging.disable()
 
 
 def calculate_entropy(data: bytes) -> float:
@@ -150,88 +155,81 @@ def extract_architecture_from_description(desc: str | None) -> str | None:
     return None
 
 
-def parse_elf_architecture(header: bytes) -> str | None:
-    """Parses ELF e_machine from ELF header (bytes 18-19)."""
-    if len(header) < 20 or not header.startswith(b"\x7fELF"):
-        return None
-    ei_data = header[5]  # 1 = little-endian, 2 = big-endian
-    endian = "<" if ei_data == 1 else ">"
+# Architecture labels keyed by the header enums LIEF decodes.
+ELF_ARCH = {
+    lief.ELF.ARCH.I386: "x86",
+    lief.ELF.ARCH.X86_64: "x86_64",
+    lief.ELF.ARCH.ARM: "arm",
+    lief.ELF.ARCH.AARCH64: "arm64",
+    lief.ELF.ARCH.MIPS: "MIPS",
+    lief.ELF.ARCH.RISCV: "riscv",
+    lief.ELF.ARCH.PPC: "PowerPC",
+    lief.ELF.ARCH.PPC64: "PowerPC64",
+    lief.ELF.ARCH.SPARC: "SPARC",
+}
+PE_ARCH = {
+    lief.PE.Header.MACHINE_TYPES.I386: "x86",
+    lief.PE.Header.MACHINE_TYPES.AMD64: "x86_64",
+    lief.PE.Header.MACHINE_TYPES.ARM: "arm",
+    lief.PE.Header.MACHINE_TYPES.ARM64: "arm64",
+}
+MACHO_ARCH = {
+    lief.MachO.Header.CPU_TYPE.X86: "x86",
+    lief.MachO.Header.CPU_TYPE.X86_64: "x86_64",
+    lief.MachO.Header.CPU_TYPE.ARM: "arm",
+    lief.MachO.Header.CPU_TYPE.ARM64: "arm64",
+    lief.MachO.Header.CPU_TYPE.POWERPC: "PowerPC",
+    lief.MachO.Header.CPU_TYPE.POWERPC64: "PowerPC64",
+}
+
+
+def parse_elf_architecture(filepath: str) -> str | None:
+    """Reads ELF e_machine via LIEF (header and sections only; symbols, relocations, notes skipped)."""
+    config = lief.ELF.ParserConfig()
+    config.parse_dyn_symbols = False
+    config.parse_symtab_symbols = False
+    config.parse_relocations = False
+    config.parse_symbol_versions = False
+    config.parse_notes = False
+    config.parse_overlay = False
     try:
-        e_machine = struct.unpack(f"{endian}H", header[18:20])[0]
-        arch_map = {
-            0x03: "x86",
-            0x3E: "x86_64",
-            0x28: "arm",
-            0xB7: "arm64",
-            0x08: "MIPS",
-            0xF3: "riscv",
-            0x14: "PowerPC",
-            0x15: "PowerPC64",
-            0x02: "SPARC",
-        }
-        return arch_map.get(e_machine)
+        binary = lief.ELF.parse(filepath, config)
+        if binary is None:
+            return None
+        return ELF_ARCH.get(binary.header.machine_type)
     except Exception:
         return None
 
 
-def parse_pe_architecture(f, header: bytes) -> str | None:
-    """Parses PE Machine from COFF header after MS-DOS header."""
-    if len(header) < 64 or not header.startswith(b"MZ"):
-        return None
+def parse_pe_architecture(filepath: str) -> str | None:
+    """Reads PE COFF Machine via LIEF (imports, exports, resources, relocations, signature skipped)."""
+    config = lief.PE.ParserConfig()
+    config.parse_imports = False
+    config.parse_exports = False
+    config.parse_rsrc = False
+    config.parse_reloc = False
+    config.parse_signature = False
+    config.parse_exceptions = False
     try:
-        e_lfanew = struct.unpack("<I", header[60:64])[0]
-        if e_lfanew > 10 * 1024 * 1024:
+        binary = lief.PE.parse(filepath, config)
+        if binary is None:
             return None
-        f.seek(e_lfanew)
-        pe_sig = f.read(4)
-        if pe_sig != b"PE\x00\x00":
-            return None
-        coff_header = f.read(20)
-        if len(coff_header) < 2:
-            return None
-        machine = struct.unpack("<H", coff_header[0:2])[0]
-        arch_map = {
-            0x014C: "x86",
-            0x8664: "x86_64",
-            0x01C0: "arm",
-            0xAA64: "arm64",
-        }
-        return arch_map.get(machine)
+        return PE_ARCH.get(binary.header.machine)
     except Exception:
         return None
 
 
-def parse_macho_architecture(header: bytes) -> str | None:
-    """Parses Mach-O cputype from Mach-O header."""
-    if len(header) < 8:
-        return None
-    magic_bytes = header[:4]
-    endian = None
-    if magic_bytes in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf"):
-        endian = ">"
-    elif magic_bytes in (b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
-        endian = "<"
-    elif magic_bytes == b"\xca\xfe\xba\xbe":
-        # Fat Mach-O: universal container
-        return "universal"
-
-    if endian:
-        try:
-            cputype = struct.unpack(f"{endian}I", header[4:8])[0]
-            # CPU_TYPE definitions
-            # 7 = x86, 0x01000007 = x86_64, 12 = ARM, 0x0100000C = ARM64
-            arch_map = {
-                7: "x86",
-                0x01000007: "x86_64",
-                12: "arm",
-                0x0100000C: "arm64",
-                18: "PowerPC",
-                0x01000012: "PowerPC64",
-            }
-            return arch_map.get(cputype)
-        except Exception:
+def parse_macho_architecture(filepath: str) -> str | None:
+    """Reads Mach-O cputype via LIEF; returns "universal" for multi-slice fat binaries."""
+    try:
+        fat = lief.MachO.parse(filepath, lief.MachO.ParserConfig.quick)
+        if fat is None or fat.size == 0:
             return None
-    return None
+        if fat.size > 1:
+            return "universal"
+        return MACHO_ARCH.get(fat.at(0).header.cpu_type)
+    except Exception:
+        return None
 
 
 def inspect_zip_container(filepath: str, result: dict) -> bool:
@@ -467,11 +465,11 @@ def triage_file(filepath: str) -> dict:
 
             # Extract architecture from headers if native binary
             if header.startswith(b"\x7fELF"):
-                elf_arch = parse_elf_architecture(header)
+                elf_arch = parse_elf_architecture(filepath)
                 if elf_arch:
                     result["architecture"] = elf_arch
             elif header.startswith(b"MZ"):
-                pe_arch = parse_pe_architecture(f, header)
+                pe_arch = parse_pe_architecture(filepath)
                 if pe_arch:
                     result["architecture"] = pe_arch
             elif (
@@ -481,7 +479,7 @@ def triage_file(filepath: str) -> dict:
                 or header.startswith(b"\xfe\xed\xfa\xcf")
                 or header.startswith(b"\xfe\xed\xfa\xce")
             ):
-                macho_arch = parse_macho_architecture(header)
+                macho_arch = parse_macho_architecture(filepath)
                 if macho_arch and macho_arch != "universal":
                     result["architecture"] = macho_arch
     except Exception as e:
@@ -519,7 +517,9 @@ def triage_file(filepath: str) -> dict:
     elif header.startswith(b"\xca\xfe\xba\xbe"):
         # Disambiguate between Java .class and Fat Mach-O
         if len(header) >= 8:
-            major_ver = struct.unpack(">H", header[6:8])[0]
+            # Dispatch only: a Java class stores its major version where a fat
+            # Mach-O stores a small big-endian slice count.
+            major_ver = int.from_bytes(header[6:8], "big")
             if 45 <= major_ver <= 70:
                 result["format"] = "Java Class"
                 if not result["mime_type"]:

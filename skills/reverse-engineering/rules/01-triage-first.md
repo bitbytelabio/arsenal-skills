@@ -13,7 +13,7 @@ Jumping directly to decompile an uncharacterized entry point or `main` without e
 - **Pre-Hook Validation**: Before executing any disassembler/decompiler command (`ida64`, `ghidra`, `cutter`, `objdump`, `radare2`), the agent must check for the presence of a triage manifest in `re_state.json` or as raw execution output from `auto_triage.py`.
 - **Immediate Rejection**: Any instruction or sub-task directing decompilation prior to artifact characterization must be rejected immediately, pivoting back to triage execution:
   ```bash
-  python3 scripts/auto_triage.py <target_path>
+  uv run scripts/auto_triage.py <target_path>
   ```
 - **Manifest Requirements**: The triage manifest must confirm:
   - Sample identity: SHA-256, path, format (`ELF`, `PE`, `Mach-O`, `DEX`, `WASM`, `Firmware`).

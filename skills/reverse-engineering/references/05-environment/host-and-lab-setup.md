@@ -148,18 +148,18 @@ AOSP / Google APIs images via Android Studio KernelSU GKI rooting methodology.
 ## 4. Automated Emulator Setup Script (`setup_android_emulator.py`)
 
 The companion automated script implements the full workflow cleanly:
-`uv run scripts/setup_android_emulator.py <subcommand>` (or `uv run scripts/setup_android_emulator.py <subcommand>`)
+`uv run scripts/setup_android_emulator.py <subcommand>`
 Supported subcommands:
 - `list`: Inspects SDK path, tools, installed system images, AVDs, and KernelSU assets in cache directory (`~/.cache/android-ksu/`).
 - `download [--kernel-version <ver>] [--apk-only] [--kernel-only]`: Automatically downloads the matching KernelSU GKI kernel AnyKernel3 zip from WildKernels and Manager APK from KernelSU-Next GitHub releases.
-- `create-avd [--name <name>] [--system-image <pkg>] [--device <device>]`: Creates AVD with `avdmanager`.
-- `patch-kernel [--system-image-path <path>] [--kernel-source <image_or_zip>]`: Backs up `kernel-ranchu` to `.orig` and replaces it with KernelSU GKI `Image` (auto-downloading matching kernel zip from GitHub releases if missing, extracting `Image`).
+- `create-avd [--name <name>] [--system-image <pkg>] [--device <device>]`: Creates AVD with `avdmanager`, finds its `config.ini` (honoring `ANDROID_AVD_HOME`, `ANDROID_USER_HOME`, `ANDROID_SDK_HOME`, and `<sdk>/.android/avd`), and sets `PlayStore.enabled=yes` for a `google_apis_playstore` image. avdmanager leaves it off.
+- `patch-kernel [--system-image-path <path>] [--kernel-source <image_or_zip>]`: Returns `already_patched` without changes when `kernel-ranchu` already contains KernelSU (some recent Play images ship one). Otherwise backs up `kernel-ranchu` to `.orig` and replaces it with KernelSU GKI `Image` (auto-downloading matching kernel zip from GitHub releases if missing, extracting `Image`).
 - `cold-boot [--avd <name>] [--headless]`: Starts emulator with `-no-snapshot-load` (and optional `-no-window -no-audio`).
 - `wait-boot [--serial <serial>] [--timeout <sec>]`: Waits for `sys.boot_completed == 1`.
-- `install-apk [--apk <path>] [--serial <serial>]`: Installs `KernelSU_Next_*.apk` via `adb install -r` (auto-downloading Manager APK from GitHub releases if missing).
-- `verify-root [--serial <serial>]`: Runs `adb shell su -c id` and confirms `uid=0`.
+- `install-apk [--apk <path>] [--serial <serial>]`: Installs `KernelSU_Next_*.apk` via `adb install -r` (auto-downloading Manager APK from GitHub releases if missing), then launches the manager once so it installs `ksud` and the su bridge.
+- `verify-root [--serial <serial>]`: Tries `su`, `/system/bin/su`, `/debug_ramdisk/su`, and `/data/adb/ksu/bin/su` with `-c id` and confirms `uid=0`. On failure it returns a `hint`: grant Superuser to Shell in the manager, and on KernelSU-Next turn off **Settings > Umount modules**, which hides `su` from the adb shell.
 - `setup-all [--avd <name>] [--headless] [--timeout <sec>]`: Executes end-to-end download/patch, boot, install, and verification.
-All subcommands support `--json` for structured automation.
+All subcommands support `--json`, before or after the subcommand name.
 ---
 
 ## 5. iOS Rooted Research Virtual Machine (`vphone-cli`)
@@ -280,7 +280,7 @@ Supported subcommands:
 - `install-ios-sim [--device <udid_or_booted>]`: Adds root CA to iOS Simulator keychain via `simctl`.
 - `export-frida-scripts [--out-dir <dir>]`: Generates `ssl_unpin_android.js` and `ssl_unpin_ios.js`.
 
-All subcommands support `--json` for structured automation.
+All subcommands support `--json`, before or after the subcommand name.
 ---
 
 ## 7. UTM Hypervisor & QCOW2 Snapshot Management
@@ -304,10 +304,10 @@ emulation for cross-architecture targets.
 - Read [`references/utm-hypervisor-and-snapshots.md`](utm-hypervisor-and-snapshots.md) for sandbox lifecycle details, copy-on-write overlays, and networking topologies.
 
 ### Automated Script (`setup_utm.py`)
-Run helper: `uv run scripts/setup_utm.py <subcommand>` (or `uv run scripts/setup_utm.py <subcommand>`)
+Run helper: `uv run scripts/setup_utm.py <subcommand>`
 - `list-vms`: Enumerates registered VMs with UUID and status.
 - `start-disposable <vm>`: Starts VM in disposable mode (`start vm without saving` via AppleScript).
-- `guest-exec <vm> <cmd> [--args ...]`: Executes command inside guest via QEMU Guest Agent without network/SSH.
+- `guest-exec <vm> <cmd> [--timeout N] [--args ...]`: Executes command inside guest via QEMU Guest Agent without network/SSH. Everything after `--args` goes to the guest verbatim, including `-NoProfile` or `/c`, so put `--timeout` and `--json` before `--args`. Example: `guest-exec Win cmd.exe --timeout 120 --args /c powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\setup_winrm.ps1`.
 - `guest-push <vm> <host_file> <guest_path>`: Copies file from host to guest via QEMU Guest Agent.
 - `guest-pull <vm> <guest_file> <host_path>`: Copies file from guest to host via QEMU Guest Agent.
 - `send-input <vm> [--text TEXT] [--click X Y]`: Injects keystrokes or mouse clicks to VM display.

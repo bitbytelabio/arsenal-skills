@@ -126,13 +126,10 @@ uv run scripts/setup_windows_vm.py add-tool \
 ## 5. Provisioning with Ansible
 
 ### 5.0 Prerequisites: Controller Ansible Collections & PyWinRM
-Before running playbooks against Windows nodes, ensure required collections and WinRM python libraries are present on the host controller:
+Check and install the controller requirements in one step. `deps` installs pywinrm into the Python that Ansible runs on (with a uv-installed Ansible this is not the `python3` on PATH), installs the five collections the playbooks use, and prints the IDA `dbgsrv` path it will copy from:
 ```bash
-# Install PyWinRM (if using uv/pip for Ansible):
-pip install pywinrm
-
-# Install required Ansible collections:
-ansible-galaxy collection install chocolatey.chocolatey ansible.windows community.windows
+uv run scripts/setup_vm.py deps            # report only, exit 1 if something is missing
+uv run scripts/setup_vm.py deps --install
 ```
 
 ### 5.1 Generate Inventory
@@ -181,19 +178,19 @@ On macOS the runner sets `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`. Without it, 
 
 UTM Windows ARM cannot reach Chocolatey until UTM Guest Tools (NetKVM) are installed and the NIC is Shared NAT. Host-only has no route to the package feeds. Switch back to host-only after the tools are in place.
 
-A Chocolatey failure does not stop the play. The playbook retries that tool with its `winget_id` when one is set. Current catalog ids: `x64dbg.portable` (there is no `x64dbg` package), `pebear` (not `pe-bear`), `python312` (the floating `python3` package is not 3.12), and `Microsoft.WinDbg` via winget (there is no `windbg` package). ProcDOT has no community package.
+A Chocolatey failure does not stop the play. The playbook retries that tool with its `winget_id` when one is set. winget is not on PATH in a WinRM session, so the task resolves `winget.exe` under `C:\Program Files\WindowsApps` and runs it through `become` (runas) as the WinRM user. MSIX packages such as WinDbg then register for that user. Current catalog ids: `x64dbg.portable` (there is no `x64dbg` package), `pebear` (not `pe-bear`), `python312` (the floating `python3` package is not 3.12), and `Microsoft.WinDbg` via winget (there is no `windbg` package). ProcDOT has no community package.
 
 The playbook executes the following stages:
-1. Gathers Windows facts (`ansible_facts['nodename']`, build).
-2. Verifies / bootstraps Chocolatey package manager.
-3. Creates Windows Firewall rules for WinRM HTTP (5985), WinRM HTTPS (5986), and IDA Pro Remote Debugger (`win64_remote.exe` on port 23946).
-4. Installs enabled tools from `windows_tools.json` with Chocolatey, then winget for a failed package or a tool that has only a `winget_id`. Node.js LTS is installed when an npm tool is enabled.
-5. Installs global npm packages for enabled tools using `npm.cmd` (e.g. `@zavora-ai/computer-use-mcp`).
-6. Deploys server management script `start_computer_use_server.ps1` to `C:\Tools\start_computer_use_server.ps1`, configures port 4517 firewall rule and netsh portproxy, and registers a logon Scheduled Task (`ComputerUseMcpServer`) for the interactive user desktop session.
-7. Installs Wireshark silently with Npcap loopback capture enabled (`/S`, `package_params: "/loopback_support=yes"`).
-8. Configures `osquery` with an initial `osquery.conf` file, registers `osqueryd` service (with fallback `osqueryd.exe --install`), and ensures `osqueryd` service is started.
-9. Adds tool installation directories (`C:\Program Files\Wireshark`, `C:\ProgramData\chocolatey\bin`, `C:\Program Files\x64dbg\release\x64`, `C:\radare2\bin`, `C:\Tools\ida_dbgsrv`, `C:\Program Files\nodejs`, `%APPDATA%\npm`) to the machine `PATH`.
-10. Validates presence of installed binaries on the target filesystem and outputs a completion summary.
+1. Gathers Windows facts and creates `C:\Tools`, `C:\Workspace`, and `C:\Tools\ida_dbgsrv`.
+2. Adds Defender exclusions for `C:\Tools`, `C:\Workspace`, and `C:\ProgramData\chocolatey\lib`. Tamper Protection blocks turning Defender off from a script, but not exclusions. Without them Defender quarantines unpackers and debuggers right after extraction.
+3. Copies `win64_remote.exe` and `win32_remote32.exe` from the host's IDA `dbgsrv` folder. If the folder was not found it prints "IDA debug servers NOT copied" instead of silently skipping.
+4. Creates firewall rules for WinRM (5985, 5986) and the IDA debug server (23946).
+5. Installs enabled tools with Chocolatey, then winget for every failed package and every tool that has only a `winget_id`.
+6. Registers the Sysmon service: `Sysmon64a.exe` on ARM64, `Sysmon64.exe` on x64, with the SwiftOnSecurity config when GitHub is reachable.
+7. Installs global npm packages (e.g. `@zavora-ai/computer-use-mcp`) and the Computer Use MCP scheduled task, firewall rule, and portproxy.
+8. Writes `osquery.conf`, registers `osqueryd` if the package did not, and starts it.
+9. Adds tool directories to the machine `PATH`.
+10. Checks every catalog `binary_path` in the guest (environment variables and wildcards are expanded) and prints `found` and `missing` lists.
 
 ---
 

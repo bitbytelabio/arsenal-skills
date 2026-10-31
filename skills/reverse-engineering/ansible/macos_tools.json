@@ -60,12 +60,42 @@
       ]
     },
     {
+      "id": "temurin",
+      "name": "Eclipse Temurin JDK 21",
+      "category": "system_utilities",
+      "description": "JDK for Ghidra.",
+      "brew_formula": null,
+      "brew_cask": "temurin@21",
+      "binary_path": "/usr/bin/java",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "java",
+        "ghidra"
+      ]
+    },
+    {
+      "id": "node",
+      "name": "Node.js",
+      "category": "system_utilities",
+      "description": "Node.js and npm for npm-based MCP servers.",
+      "brew_formula": "node",
+      "brew_cask": null,
+      "binary_path": "/opt/homebrew/bin/npm",
+      "service_name": null,
+      "enabled": true,
+      "tags": [
+        "node",
+        "npm"
+      ]
+    },
+    {
       "id": "ghidra",
       "name": "NSA Ghidra",
       "category": "debugging_disassembly",
-      "description": "Comprehensive software reverse engineering suite with decompiler and headless analyzer.",
-      "brew_formula": "ghidra",
-      "brew_cask": null,
+      "description": "NSA Ghidra SRE suite. Homebrew ships it as a cask (not a formula) and it needs a JDK (temurin@21 below).",
+      "brew_formula": null,
+      "brew_cask": "ghidra",
       "binary_path": "/opt/homebrew/bin/ghidraRun",
       "service_name": null,
       "enabled": true,
@@ -253,10 +283,10 @@
       "id": "computer-use-mcp",
       "name": "Computer Use MCP Server",
       "category": "automation_agent",
-      "description": "Desktop automation MCP server (@zavora-ai/computer-use-mcp) enabling host AI agents to automate the macOS guest desktop over port 4517.",
+      "description": "Desktop automation MCP server (@zavora-ai/computer-use-mcp), installed globally with Homebrew's npm.",
       "brew_formula": null,
       "brew_cask": null,
-      "binary_path": "/usr/local/bin/computer-use-mcp",
+      "binary_path": "/opt/homebrew/bin/computer-use-mcp",
       "service_name": "com.zavora.computer-use-mcp",
       "enabled": true,
       "tags": [

@@ -1,12 +1,85 @@
-# Mobile Network Traffic Interception and TLS Pinning
+# Network Traffic Interception with mitmproxy
 
 ## Purpose
 
-Use this reference to route authorized application traffic through `mitmproxy`, establish the proxy CA as a trust anchor, bypass framework and native certificate pinning, and turn the decrypted flows into an API map or a command-and-control state machine. Use [`frida.md`](../04-tool-usage/frida.md) for the complete Android and iOS hook scripts and [`flutter-dart.md`](../01-static-architectures/flutter-dart.md) for Flutter's BoringSSL verifier. Binary framing, protobuf, and gRPC wire layout stay in [`protocol-recovery.md`](../03-objectives/protocol-recovery.md).
+Use this reference to put an authorized client's traffic through `mitmproxy` and read it. The client can be a desktop app, a CLI tool, an Electron or Java app, a process in a lab VM or container, or a mobile app. The steps are: pick a capture mode, make the client trust the proxy CA, defeat pinning only if it rejects that CA, then turn the decrypted flows into an API map or a protocol state machine. Frida hook scripts are in [`frida.md`](../04-tool-usage/frida.md). Flutter's BoringSSL verifier is in [`flutter-dart.md`](../01-static-architectures/flutter-dart.md). Binary framing, protobuf, and gRPC wire layout are in [`protocol-recovery.md`](../03-objectives/protocol-recovery.md).
 
-## Mandatory Mobile Pre-Flight Environment Gate
+## Choose the capture mode
 
-**MUST pass this gate before starting `mitmdump`, spawning the application, or applying an SSL pinning bypass.** If the target is absent or not rooted, do not fail the analysis and do not try blind hooks. Bridge to [host and lab setup](../05-environment/host-and-lab-setup.md), provision the environment, and repeat the checks.
+Pick the mode from how the client finds the network. Do not start with a pinning bypass.
+
+| Client | Mode | Command | Note |
+|---|---|---|---|
+| Honors `HTTP(S)_PROXY` or the OS proxy setting | `regular` (default) | `mitmdump -p 8080` | Set the proxy in the app, the OS, or the environment. |
+| Ignores proxy settings, runs on this Mac or a Windows host | `local` | `mitmdump --mode local:<process-name>` | Captures one process by name or PID, with no proxy config. `local:!name` captures everything except that process. Needs the macOS system extension or Windows redirector on first run. |
+| Lab VM, device, or container that ignores proxies | `wireguard` | `mitmdump --mode wireguard` | Import the printed WireGuard config in the guest. All guest traffic goes through the tunnel, including raw TCP and UDP, which mitmproxy passes through. |
+| A single known backend you can redirect by DNS or hosts file | `reverse` | `mitmdump --mode reverse:https://api.example.test@8443` | Point the client at the proxy as if it were the server. Good for a sample whose server you mock. |
+| Supports SOCKS only (some CLI tools, Tor-aware clients) | `socks5` | `mitmdump --mode socks5 -p 1080` | |
+| Must chain to a corporate or lab upstream proxy | `upstream` | `mitmdump --mode upstream:http://10.0.0.1:3128` | |
+| Gateway or router you control | `transparent` | `mitmdump --mode transparent` | Needs pf or iptables redirection. Prefer `wireguard` in labs. |
+
+Several modes can run together: `--mode regular@8080 --mode wireguard@51820`.
+
+If the proxy sees no connection at all, the problem is routing, not TLS. Fix the mode before you trust the CA or hook anything.
+
+## Trust the proxy CA
+
+Start `mitmdump` once to create `~/.mitmproxy/mitmproxy-ca-cert.pem`. With the proxy running, `http://mitm.it` on the client serves the CA for each platform.
+
+| Client | Install trust |
+|---|---|
+| macOS system | `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/.mitmproxy/mitmproxy-ca-cert.pem` |
+| Windows | `certutil -addstore -f Root mitmproxy-ca-cert.cer` (elevated) |
+| Debian/Ubuntu | Copy to `/usr/local/share/ca-certificates/mitmproxy.crt`, then `sudo update-ca-certificates` |
+| Fedora/RHEL | Copy to `/etc/pki/ca-trust/source/anchors/`, then `sudo update-ca-trust` |
+| Python `requests` / `httpx` | `REQUESTS_CA_BUNDLE` or `SSL_CERT_FILE` pointing at the PEM |
+| Node.js / Electron main process | `NODE_EXTRA_CA_CERTS=/path/mitmproxy-ca-cert.pem` |
+| Java | `keytool -importcert -cacerts -alias mitmproxy -file mitmproxy-ca-cert.pem` (per JRE; bundled JREs keep their own `cacerts`) |
+| Go | Uses the OS store on macOS and Windows; `SSL_CERT_FILE` on Linux. A pinned `tls.Config` ignores both. |
+| curl / OpenSSL tools | `--cacert`, or `CURL_CA_BUNDLE` |
+| Docker container | Mount the PEM and run the distro's CA update in the image, or set the runtime variable above |
+| Android / iOS | See the mobile sections below. A user-added CA is not enough on Android 7 and later. |
+
+Proxy environment variables for CLI clients:
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:8080 HTTPS_PROXY=http://127.0.0.1:8080 NO_PROXY=localhost,127.0.0.1
+```
+
+In a lab VM, use the host address on the VM network (`192.168.64.1` on UTM Shared Network, `10.0.2.2` on Emulated VLAN or the Android Emulator). Windows guests: `netsh winhttp set proxy 192.168.64.1:8080` covers WinHTTP clients. WinINet apps read the per-user setting in Internet Options. macOS guests: `networksetup -setsecurewebproxy "Ethernet" 192.168.64.1 8080`. When a guest app ignores all of these, use `wireguard` mode.
+
+## Run the proxy
+
+Record everything to a flow file and decide what to read afterwards:
+
+```bash
+mitmdump -p 8080 --set block_global=false \
+  --save-stream-file /tmp/session.mitm \
+  --set hardump=/tmp/session.har
+```
+
+`block_global=false` is needed when the client is on another host or VM. Keep the listener on the lab interface, not on a public one.
+
+| Need | Option |
+|---|---|
+| Only one app's hosts | `--allow-hosts '(^|\.)api\.example\.test$'` |
+| Leave pinned or irrelevant hosts untouched (TLS passthrough) | `--ignore-hosts 'apple\.com|googleapis\.com'` |
+| Read a saved file with a filter | `mitmdump -nr /tmp/session.mitm '~d api.example.test & ~m POST'` |
+| Filter expressions | `~d` domain, `~u` URL regex, `~m` method, `~c` status, `~t` content type, `~websocket`, `~b` body, combined with `&`, `|`, `!` |
+| Serve a local file for a URL | `--map-local '|~d api.example.test|/v1/config|/lab/config.json'` |
+| Rewrite a body or header in flight | `--modify-body '/~s/"enabled":false/"enabled":true'`, `--modify-headers '/~q/User-Agent/lab'` |
+| Refuse a host | `--set block_list='|~d telemetry.example.test|444'` (444 closes the connection) |
+| Offline mock from an earlier capture | `--server-replay /tmp/session.mitm --set server_replay_extra=404` (unmatched requests get 404, nothing leaves the lab) |
+| Decrypt the same session in Wireshark | `MITMPROXY_SSLKEYLOGFILE=/tmp/mitm.keys mitmdump ...`, then `tshark -o tls.keylog_file:/tmp/mitm.keys` |
+| Interactive UI | `mitmweb --web-host 127.0.0.1 --web-port 8081 -p 8080` |
+
+`server_replay_extra=kill` or `404` is the safe default whenever the client is a malware sample. `forward` sends unmatched requests to the internet.
+
+## Mobile targets: pre-flight gate
+
+Skip this section for desktop, VM, container, and CLI targets.
+
+**For a mobile app, pass this gate before spawning the application or applying an SSL pinning bypass.** If the target is absent or not rooted, do not fail the analysis and do not try blind hooks. Bridge to [host and lab setup](../05-environment/host-and-lab-setup.md), provision the environment, and repeat the checks.
 
 ### Android
 
@@ -23,17 +96,17 @@ Proceed only when the intended target is in the `device` state, `su -c id` conta
 Automatic remediation:
 
 ```bash
-python3 scripts/setup_android_emulator.py setup-all
+uv run scripts/setup_android_emulator.py setup-all
 adb wait-for-device
 adb shell "su -c id"
-python3 scripts/setup_proxy_ca.py install-android
+uv run scripts/setup_proxy_ca.py install-android
 ```
 
 The tool-setup path uses an official Google Play ARM64 image, replaces `kernel-ranchu` with a matching KernelSU GKI `Image`, cold-boots the emulator, installs `KernelSU_Next_*.apk`, and verifies `uid=0(root)`. The current script expects a compatible system image to be installed; if none exists, install it before rerunning:
 
 ```bash
 sdkmanager "system-images;android-36;google_apis_playstore;arm64-v8a"
-python3 scripts/setup_android_emulator.py setup-all
+uv run scripts/setup_android_emulator.py setup-all
 ```
 
 ### iOS
@@ -67,7 +140,7 @@ frida-ps -H 127.0.0.1:27042 -ai
 The jailbreak firmware path applies the 112-patch set and provides root SSH on port 2222, Sileo, TrollStore, and guest `frida-server`. For a booted Simulator, install the proxy CA with the actual tool-setup subcommand:
 
 ```bash
-python3 scripts/setup_proxy_ca.py install-ios-sim
+uv run scripts/setup_proxy_ca.py install-ios-sim
 ```
 
 For the research guest, transfer the CA profile into the guest, install it, and enable full trust in **Settings > General > About > Certificate Trust Settings**. `install-ios-sim` changes only the Simulator keychain.
@@ -94,21 +167,13 @@ Diagnose the failing stage instead of applying every bypass:
 | Hook logs but no proxy connection | Pin callback reached | Proxy routing |
 | TCP capture only, no HTTP | Network path | TLS or non-HTTP application protocol |
 
-## Proxy and CA Preparation
+## Mobile CA preparation
 
-Start `mitmdump` once to create `~/.mitmproxy/mitmproxy-ca-cert.pem`, then verify and install the CA:
-
-```bash
-mitmdump --listen-host 0.0.0.0 --listen-port 8080 \
-  --set block_global=false \
-  --save-stream-file /tmp/mobile-session.mitm
-```
-
-In a second terminal:
+With `mitmdump` running as above, in a second terminal:
 
 ```bash
-python3 scripts/setup_proxy_ca.py status
-python3 scripts/setup_proxy_ca.py export-ca \
+uv run scripts/setup_proxy_ca.py status
+uv run scripts/setup_proxy_ca.py export-ca \
   --out-dir /tmp/mitmproxy-ca
 ```
 
@@ -119,8 +184,8 @@ python3 scripts/setup_proxy_ca.py export-ca \
 ### 1. Install trust and configure routing
 
 ```bash
-python3 scripts/setup_proxy_ca.py install-android
-python3 scripts/setup_proxy_ca.py set-android-proxy \
+uv run scripts/setup_proxy_ca.py install-android
+uv run scripts/setup_proxy_ca.py set-android-proxy \
   --host 10.0.2.2 --port 8080
 adb shell settings get global http_proxy
 ```
@@ -149,20 +214,7 @@ The script reports each class and overload it actually hooks. A successful Frida
 
 ### 3. Preserve proxy traffic
 
-```bash
-mitmdump --listen-host 0.0.0.0 --listen-port 8080 \
-  --set block_global=false \
-  --save-stream-file /tmp/android-session.mitm \
-  --flow-detail 2
-```
-
-As an alternative to the headless command, start an interactive session with `mitmweb`:
-
-```bash
-mitmweb --web-host 127.0.0.1 --web-port 8081 \
-  --listen-port 8080 \
-  --set block_global=false
-```
+Use the recording command from "Run the proxy". Add `--flow-detail 2` to see headers live. An app that ignores the global proxy setting still reaches the proxy through `wireguard` mode with the WireGuard app in the emulator.
 
 ## iOS End-to-End Workflow
 
@@ -171,7 +223,7 @@ mitmweb --web-host 127.0.0.1 --web-port 8081 \
 For a booted Simulator:
 
 ```bash
-python3 scripts/setup_proxy_ca.py install-ios-sim
+uv run scripts/setup_proxy_ca.py install-ios-sim
 xcrun simctl openurl booted http://mitm.it
 ```
 
@@ -299,11 +351,11 @@ Keep the conversation table, the DNS names, the SNI list, the beacon gap, and th
 The following addon records metadata and bodies without mutating traffic:
 
 ```python
-# dump_mobile.py
+# flow_log.py
 from mitmproxy import http
 
 
-class MobileRecorder:
+class FlowRecorder:
     def request(self, flow: http.HTTPFlow) -> None:
         print(
             f"REQUEST {flow.request.method} {flow.request.pretty_url} "
@@ -324,16 +376,15 @@ class MobileRecorder:
         print(f"WEBSOCKET {direction} bytes={len(message.content)}")
 
 
-addons = [MobileRecorder()]
+addons = [FlowRecorder()]
 ```
 
 Run it with a serialized flow capture:
 
 ```bash
-mitmdump --listen-port 8080 \
-  --set block_global=false \
-  --scripts dump_mobile.py \
-  --save-stream-file /tmp/mobile-session.mitm
+mitmdump -p 8080 --set block_global=false \
+  --scripts flow_log.py \
+  --save-stream-file /tmp/session.mitm
 ```
 
 ## Reading Flows As Backend Logic
@@ -400,11 +451,11 @@ def response(flow: http.HTTPFlow) -> None:
         flow.response.content = b'{"status":"wait","sleep":30}'
 ```
 
-Do this only against the intercepted client in the lab. Do not forward the modified call, or any replay, to a production host or a live command-and-control server.
+Do this only against the intercepted client in the lab. Do not forward the modified call, or any replay, to a production host or to a server a malware sample talks to. For a whole mocked backend, record once and serve it with `--server-replay` and `server_replay_extra=404`.
 
-## Complex Command And Control
+## Multi-stage and long-lived channels
 
-Treat a suspected C2 channel as the same map, with a stricter egress rule. The sample stays on a sinkhole or a local mock. The first goal is the state machine, not a conversation with the operator.
+Some clients do more than request and response: they register, poll for work, download modules, or switch transport when one fails. Updaters, sync agents, game clients, and malware samples all do this. Build the same map, and add a state machine. When the client is untrusted, use a stricter egress rule: it stays on a sinkhole or a local mock (`--server-replay`, `--map-local`, or an addon), and the goal is the state machine, not a conversation with whoever runs the server.
 
 Walk the capture in order and label each flow as one of: bootstrap, key or config, check-in, task poll, task result, module download, or idle. A flow you cannot label stays unknown.
 
@@ -412,16 +463,16 @@ Shapes that hide that machine:
 
 | What you see | What it usually is | Next measurement |
 |---|---|---|
-| One POST on a timer, small body, short JSON or empty 200 | Beacon or poll | Vary the interval across two runs. Jitter around a constant is the sleep from the last response or a hardcoded range. |
+| One POST on a timer, small body, short JSON or empty 200 | Heartbeat or poll | Vary the interval across two runs. Jitter around a constant is the sleep from the last response or a hardcoded range. |
 | First response is large, later requests shrink | Config or a task list delivered once | Diff the two responses. The stable object is config. The object that disappears is a one-shot task. |
 | JSON or cookie wraps a base64 or hex blob | Framing around a custom payload | Decode one layer. If entropy stays high, the blob is the cipher. Find the encrypt call in the client. |
 | `Host` is a CDN or a benign site, SNI and `Host` disagree, or a fronted domain | The visible host is not the application host | Record both names. The inner `Host` or the path is the real channel. |
-| Image, profile, or paste-site body | A dead drop | Extract the stego or the paste body in the lab. Do not fetch the live URL again from the analysis host. |
+| Image, profile, or paste-site body | Data hidden in a benign-looking resource | Extract the stego or the paste body in the lab. Do not fetch the live URL again from the analysis host. |
 | HTTPS fails and the sample then uses DNS TXT, DoH, or raw TCP | A fallback transport | The HTTP failure is the trigger. Capture that next protocol separately. Its framing is [`protocol-recovery.md`](../03-objectives/protocol-recovery.md). |
 | Long-lived WebSocket or gRPC stream | Tasking pushed by the server | Order the frames. A server frame followed by a client frame is a task and its result. |
 | Several hosts, one succeeds | A proxy list | The winner is the active channel. The failures are backups, not separate features. |
 
-A client that exits after check-in with no task is not "harmless". The tasking branch may simply not have been served. Say which states you observed and which response you never received.
+A client that exits after check-in with no task has not shown that it does nothing. The tasking branch may simply not have been served. Say which states you observed and which response you never received.
 
 Re-anchor every labeled flow to the function that builds it. A path string, a format string, or the caller of `HttpSendRequest` / `NSURLSession` / OkHttp is the static half. The flow is the dynamic half. Both are required before the state machine is `validated`.
 
@@ -429,7 +480,7 @@ Re-anchor every labeled flow to the function that builds it. A path string, a fo
 
 Minimum evidence for a completed interception:
 
-1. The environment gate output proves the intended target and root state.
+1. The proxy saw the client's connections in the chosen mode. For mobile targets, the gate output proves the intended target and root state.
 2. The CA helper reports the certificate hash and installation method.
 3. The proxy setting resolves to the expected host and port.
 4. The relevant pinning hook logs a callback for the target hostname.
@@ -439,16 +490,20 @@ Minimum evidence for a completed interception:
 Restore the environment after analysis:
 
 ```bash
-python3 scripts/setup_proxy_ca.py clear-android-proxy
+uv run scripts/setup_proxy_ca.py clear-android-proxy
 adb shell settings get global http_proxy
+unset HTTP_PROXY HTTPS_PROXY        # CLI clients
+netsh winhttp reset proxy           # Windows guest
 ```
+
+Remove the test CA from any machine that is not disposable: `security delete-certificate -c mitmproxy` on macOS, `certutil -delstore Root mitmproxy` on Windows, and on Debian/Ubuntu delete the `.crt` and run `update-ca-certificates --fresh`.
 
 Stop `frida-server`, remove temporary capture material according to the engagement's evidence policy, and remove the test CA from disposable targets before reusing or exporting them.
 
 ## Boundaries
 
 - Intercept only applications and endpoints covered by explicit authorization.
-- Never send arbitrary traffic to live malware command-and-control infrastructure. Use a sinkhole or a response generated inside the lab proxy. A mocked body tests the client. It is not a server you put on the internet.
+- Never send traffic to a live server that a malware sample talks to. Use a sinkhole, `--server-replay` with `server_replay_extra=404`, or a response generated inside the lab proxy. A mocked body tests the client. It is not a server you put on the internet.
 - A decrypted body does not prove what the backend authorizes. Client checks and server checks are different programs.
 - Treat authentication tokens, session cookies, personal data, and captured bodies as sensitive evidence.
 - Do not call a bypass successful from an attach message alone; require hook and decrypted-flow evidence.

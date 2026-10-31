@@ -1,19 +1,29 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pyelftools>=0.31",
+# ]
+# ///
 """Read-only ELF symbol span and file-symbol report.
 
 Prints every FUNC/OBJECT in an address window and every STT_FILE name that is
-not a .o runtime object. Never executes or loads the target. Standard library only.
+not a .o runtime object. Never executes or loads the target. Sections and
+symbols are parsed with pyelftools.
 
 Usage:
-  python3 elf_symbols.py target.bin
-  python3 elf_symbols.py target.bin --span 0x401100 0x401800
+  uv run scripts/elf_symbols.py target.bin
+  uv run scripts/elf_symbols.py target.bin --span 0x401100 0x401800
 
 Exit codes: 0 success, 2 unreadable/not ELF/bad span.
 """
 
 import argparse
-import struct
 import sys
+
+from elftools.common.exceptions import ELFError
+from elftools.elf.elffile import ELFFile
+from elftools.elf.sections import SymbolTableSection
 
 
 def die(msg):
@@ -28,97 +38,58 @@ def parse_int(text):
         die("bad address %r" % text)
 
 
-def cstr(data, start):
-    if start < 0 or start >= len(data):
-        return "?"
-    end = data.find(b"\x00", start)
-    if end < 0:
-        end = len(data)
-    return data[start:end].decode("utf-8", "replace")
-
-
 def load(path):
     try:
-        data = open(path, "rb").read()
+        f = open(path, "rb")
     except OSError as exc:
         die("cannot read %s: %s" % (path, exc))
-    if len(data) < 52 or data[:4] != b"\x7fELF":
-        die("%s is not an ELF file" % path)
-    if data[4] not in (1, 2) or data[5] != 1:
-        die("%s is not little-endian ELF32/ELF64" % path)
-    bits = 64 if data[4] == 2 else 32
-    if bits == 64:
-        e_shoff = struct.unpack_from("<Q", data, 40)[0]
-        e_shentsize = struct.unpack_from("<H", data, 58)[0]
-        e_shnum = struct.unpack_from("<H", data, 60)[0]
-        e_shstrndx = struct.unpack_from("<H", data, 62)[0]
-    else:
-        e_shoff = struct.unpack_from("<I", data, 32)[0]
-        e_shentsize = struct.unpack_from("<H", data, 46)[0]
-        e_shnum = struct.unpack_from("<H", data, 48)[0]
-        e_shstrndx = struct.unpack_from("<H", data, 50)[0]
-    if not e_shoff or not e_shnum:
-        die("%s has no section headers" % path)
-    sections = []
-    for i in range(e_shnum):
-        off = e_shoff + i * e_shentsize
-        if bits == 64:
-            name, typ, _flags, addr, offset, size, link, _info, _align, entsize = struct.unpack_from(
-                "<IIQQQQIIQQ", data, off
-            )
-        else:
-            name, typ, _flags, addr, offset, size, link, _info, _align, entsize = struct.unpack_from(
-                "<IIIIIIIIII", data, off
-            )
-        sections.append(
-            {
-                "name": name,
-                "type": typ,
-                "addr": addr,
-                "offset": offset,
-                "size": size,
-                "link": link,
-                "entsize": entsize,
-            }
-        )
-    shstr = sections[e_shstrndx] if 0 <= e_shstrndx < len(sections) else None
-    for sec in sections:
-        sec["sname"] = cstr(data, shstr["offset"] + sec["name"]) if shstr else "?"
-    return data, sections
+    with f:
+        if f.read(4) != b"\x7fELF":
+            die("%s is not an ELF file" % path)
+        try:
+            elf = ELFFile(f)
+            if not elf.num_sections():
+                die("%s has no section headers" % path)
+            sections = [
+                {"addr": sec["sh_addr"], "offset": sec["sh_offset"]} for sec in elf.iter_sections()
+            ]
+            return sections, symbols(elf)
+        except ELFError as exc:
+            die("%s is not a valid ELF file: %s" % (path, exc))
 
 
-def symbols(data, sections):
-    symtab = next((s for s in sections if s["type"] == 2), None)
-    if not symtab or not symtab["entsize"]:
+def symbols(elf):
+    symtab = next(
+        (
+            s
+            for s in elf.iter_sections()
+            if s["sh_type"] == "SHT_SYMTAB" and isinstance(s, SymbolTableSection)
+        ),
+        None,
+    )
+    if not symtab or not symtab["sh_entsize"]:
         die("no symbol table")
-    strtab = sections[symtab["link"]]
-    bits = 64 if data[4] == 2 else 32
-    count = symtab["size"] // symtab["entsize"]
     out = []
-    for i in range(count):
-        off = symtab["offset"] + i * symtab["entsize"]
-        if bits == 64:
-            name, info, _other, shndx, value, size = struct.unpack_from("<IBBHQQ", data, off)
-        else:
-            name, value, size, info, _other, shndx = struct.unpack_from("<IIIBBH", data, off)
+    for sym in symtab.iter_symbols():
         out.append(
             {
-                "name": cstr(data, strtab["offset"] + name),
-                "type": info & 0xF,
-                "shndx": shndx,
-                "value": value,
-                "size": size,
+                "name": sym.name,
+                "type": sym["st_info"]["type"],
+                # Special indexes (SHN_UNDEF/ABS/COMMON) decode to names.
+                "shndx": sym["st_shndx"],
+                "value": sym["st_value"],
+                "size": sym["st_size"],
             }
         )
     return out
 
 
-STT = {1: "OBJECT", 2: "FUNC", 4: "FILE"}
+STT = {"STT_OBJECT": "OBJECT", "STT_FUNC": "FUNC", "STT_FILE": "FILE"}
 
 
 def file_backed(sym, sections):
     idx = sym["shndx"]
-    return 0 < idx < len(sections)
+    return isinstance(idx, int) and 0 < idx < len(sections)
 
 
 def main():
@@ -126,11 +97,10 @@ def main():
     ap.add_argument("path")
     ap.add_argument("--span", nargs=2, metavar=("START", "END"))
     args = ap.parse_args()
-    data, sections = load(args.path)
-    syms = symbols(data, sections)
+    sections, syms = load(args.path)
     print("-- STT_FILE outside runtime objects --")
     for sym in syms:
-        if sym["type"] == 4 and sym["name"] and not sym["name"].endswith(".o"):
+        if sym["type"] == "STT_FILE" and sym["name"] and not sym["name"].endswith(".o"):
             print("  %s" % sym["name"])
     start, end = (0, 1 << 64)
     if args.span:
@@ -140,7 +110,7 @@ def main():
     print("-- FUNC/OBJECT in [0x%x, 0x%x) --" % (start, end))
     shown = 0
     for sym in sorted(syms, key=lambda s: (s["value"], s["name"])):
-        if sym["type"] not in (1, 2) or not file_backed(sym, sections):
+        if sym["type"] not in ("STT_OBJECT", "STT_FUNC") or not file_backed(sym, sections):
             continue
         if not (start <= sym["value"] < end):
             continue
