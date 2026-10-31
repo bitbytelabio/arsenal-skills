@@ -25,7 +25,7 @@ The structured JSON catalog covers essential reverse engineering and monitoring 
 - **`network_analysis`**: `tshark` / `wireshark` (formula `wireshark`)
 - **`debugging_disassembly`**:
   - `radare2` (formula `radare2`)
-  - `ghidra` (cask `ghidra`)
+  - `ghidra` (formula `ghidra`; pulls in openjdk)
   - `jtool2` (formula `jtool2`, Mach-O / dyld shared cache symbol inspection)
   - `ida_dbgsrv` (IDA Pro mac_server / mac_server_arm on port 23946)
 - **`forensics_triage`**:
@@ -82,7 +82,7 @@ The playbook performs:
 1. **Directory Staging**: Prepares `/opt/ida_dbgsrv` owned by the user and copies `mac_server_arm` (or `mac_server`) from the host's IDA `dbgsrv` folder. `DevToolsSecurity -enable` allows debugging without a prompt per attach.
 2. **Packet Filter Firewall**: Deploys `/etc/pf.anchors/com.re.tools` and loads PF rules to allow port `23946` (IDA debug server) and `4517` (Computer Use MCP).
 3. **Homebrew Bootstrap**: Installs Homebrew from the signed `Homebrew.pkg` release (one HTTPS download with retries; the signature is checked), and falls back to `install.sh` only if that fails. On the UTM guest `install.sh` failed five times on `git fetch` with "Connection reset by peer". The pkg assigns `/opt/homebrew` to the console user, so log that user in (UTM provisioning sets automatic login). The installer and pkg casks call sudo without a TTY, so the play adds a temporary NOPASSWD rule in `/etc/sudoers.d/zz-ansible-homebrew` and removes it in an `always` block.
-4. **Formula & Cask Installations**: Installs each formula and cask separately so one failure does not skip the rest. Ghidra is a cask (`ghidra`) and needs the `temurin@21` cask. `node` provides npm for `@zavora-ai/computer-use-mcp`.
+4. **Formula & Cask Installations**: Installs each formula and cask separately so one failure does not skip the rest. Ghidra is a formula (the cask was removed upstream). Third-party taps (`blacktop/tap`, `excitedplus1s/repo`) are trusted with `brew trust` before use; current Homebrew refuses untrusted taps. `jtool2` is a cask in its tap. `node` provides npm for `@zavora-ai/computer-use-mcp`.
 5. **Telemetry Daemon**: Stages a baseline `osquery.conf` in `/var/osquery/`.
 
 ---

@@ -11,7 +11,7 @@
       "description": "SQL-powered operating system instrumentation, monitoring, and analytics agent.",
       "brew_formula": null,
       "brew_cask": "osquery",
-      "binary_path": "/opt/osquery/bin/osqueryi",
+      "binary_path": "/usr/local/bin/osqueryi",
       "service_name": "io.osquery.osqueryd",
       "enabled": true,
       "tags": [
@@ -60,21 +60,6 @@
       ]
     },
     {
-      "id": "temurin",
-      "name": "Eclipse Temurin JDK 21",
-      "category": "system_utilities",
-      "description": "JDK for Ghidra.",
-      "brew_formula": null,
-      "brew_cask": "temurin@21",
-      "binary_path": "/usr/bin/java",
-      "service_name": null,
-      "enabled": true,
-      "tags": [
-        "java",
-        "ghidra"
-      ]
-    },
-    {
       "id": "node",
       "name": "Node.js",
       "category": "system_utilities",
@@ -93,9 +78,9 @@
       "id": "ghidra",
       "name": "NSA Ghidra",
       "category": "debugging_disassembly",
-      "description": "NSA Ghidra SRE suite. Homebrew ships it as a cask (not a formula) and it needs a JDK (temurin@21 below).",
-      "brew_formula": null,
-      "brew_cask": "ghidra",
+      "description": "NSA Ghidra SRE suite. Homebrew ships it as a formula (the old cask is gone) and installs openjdk as a dependency.",
+      "brew_formula": "ghidra",
+      "brew_cask": null,
       "binary_path": "/opt/homebrew/bin/ghidraRun",
       "service_name": null,
       "enabled": true,
@@ -163,9 +148,9 @@
       "id": "jtool2",
       "name": "jtool2",
       "category": "debugging_disassembly",
-      "description": "Mach-O disassembler, dyld shared cache extractor, and symbol inspection tool.",
-      "brew_formula": "excitedplus1s/repo/jtool2",
-      "brew_cask": null,
+      "description": "Mach-O inspection tool by Jonathan Levin. The excitedplus1s/repo tap ships it as a cask.",
+      "brew_formula": null,
+      "brew_cask": "excitedplus1s/repo/jtool2",
       "binary_path": "/opt/homebrew/bin/jtool2",
       "service_name": null,
       "enabled": true,
@@ -184,7 +169,7 @@
       "description": "Python 3 programming environment for scripting, automation, and tooling.",
       "brew_formula": "python@3.12",
       "brew_cask": null,
-      "binary_path": "/opt/homebrew/bin/python3",
+      "binary_path": "/opt/homebrew/opt/python@3.12/bin/python3.12",
       "service_name": null,
       "enabled": true,
       "tags": [
@@ -249,10 +234,10 @@
       "id": "curl",
       "name": "cURL",
       "category": "system_utilities",
-      "description": "Command-line tool and library for transferring data with URLs.",
+      "description": "Command-line tool and library for transferring data with URLs. Keg-only: the system curl stays first on PATH.",
       "brew_formula": "curl",
       "brew_cask": null,
-      "binary_path": "/opt/homebrew/bin/curl",
+      "binary_path": "/opt/homebrew/opt/curl/bin/curl",
       "service_name": null,
       "enabled": true,
       "tags": [

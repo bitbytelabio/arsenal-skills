@@ -179,15 +179,29 @@
             create: true
             mode: "0644"
 
-        - name: Tap third-party repositories used by enabled formulae
+        - name: Collect third-party taps used by enabled formulae and casks
+          ansible.builtin.set_fact:
+            brew_taps: >-
+              {{ (enabled_tools | selectattr('brew_formula', 'defined') | map(attribute='brew_formula') | list
+                  + enabled_tools | selectattr('brew_cask', 'defined') | map(attribute='brew_cask') | list)
+                 | reject('none') | select('search', '^[^/]+/[^/]+/') | map('regex_replace', '^([^/]+/[^/]+)/.*$', '\1')
+                 | unique | list }}
+
+        - name: Tap third-party repositories
           community.general.homebrew_tap:
             name: "{{ item }}"
             state: present
-          loop: >-
-            {{ enabled_tools | selectattr('brew_formula', 'defined') | map(attribute='brew_formula')
-               | reject('none') | select('search', '^[^/]+/[^/]+/') | map('regex_replace', '^([^/]+/[^/]+)/.*$', '\1')
-               | unique | list }}
+          loop: "{{ brew_taps }}"
           ignore_errors: true
+
+        # Current Homebrew refuses to load formulae or casks from a tap until it
+        # is trusted ("Refusing to load ... from untrusted tap").
+        - name: Trust third-party taps
+          ansible.builtin.command: "{{ brew_bin }} trust {{ item }}"
+          loop: "{{ brew_taps }}"
+          register: brew_trust
+          changed_when: brew_trust.rc == 0
+          failed_when: false
 
         # One formula per call: a single failing formula would otherwise
         # abort the whole batch.
@@ -201,7 +215,6 @@
             label: "{{ item.brew_formula }}"
           ignore_errors: true
 
-        # Casks before npm: ghidra needs the temurin JDK cask.
         - name: Install Homebrew casks
           community.general.homebrew_cask:
             name: "{{ item.brew_cask }}"
