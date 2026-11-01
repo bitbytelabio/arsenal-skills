@@ -2,7 +2,7 @@
 name: reverse-engineering
 description: Reverse a shipped binary, package, firmware image, or offline capture. Start with the file header and one matching architecture note. Open a decompiler, dynamic, or lab guide only after that, and only when the task allows it.
 metadata:
-  version: "66"
+  version: "67"
 ---
 
 # Reverse Engineering
@@ -107,7 +107,7 @@ This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and ma
 | `.gopclntab`, `runtime.morestack`, Go 1.17+ register ABI | Native Go (pclntab recovery, moduledata, goroutines) | [01-static-architectures/native-golang.md](references/01-static-architectures/native-golang.md) |
 | `IMAGE_COR20_HEADER`, `BSJB`, JAR, or CIL metadata | Managed .NET & JVM (CIL, JNI, P/Invoke). Android APK decision order is the next row. | [01-static-architectures/managed-dotnet-jvm.md](references/01-static-architectures/managed-dotnet-jvm.md) |
 | `.apk`, `.aab`, `AndroidManifest.xml`, `classes.dex` | Android APK (jadx, apktool, packers, handoff to `.so`) | [01-static-architectures/android-apk.md](references/01-static-architectures/android-apk.md) |
-| `global-metadata.dat` (`0xFAB11BAF`) + `libil2cpp.so`/`GameAssembly.dll` | Unity IL2CPP (`scripts/il2cpp_tools.py`: il2cpp-dumper-rs, Il2CppInspectorRedux, frida-il2cpp-bridge, Zygisk-Il2CppDumper) | [01-static-architectures/unity-il2cpp.md](references/01-static-architectures/unity-il2cpp.md) |
+| `global-metadata.dat` (`0xFAB11BAF`, or `0xEAB11BAF` with a sane version) + `libil2cpp.so`/`GameAssembly.dll` | Unity IL2CPP (`scripts/il2cpp_tools.py`: il2cpp-dumper-rs, Il2CppInspectorRedux, frida-il2cpp-bridge, Zygisk-Il2CppDumper). A protected image may export no `il2cpp_*`. Header repair is §4.5 of the reference. | [01-static-architectures/unity-il2cpp.md](references/01-static-architectures/unity-il2cpp.md) |
 | Mach-O with `__objc_classlist`, Swift 5 `$s`, IPA package | Apple iOS & macOS Native (ObjC runtime, Swift ABI) | [01-static-architectures/mobile-ios.md](references/01-static-architectures/mobile-ios.md) |
 | Web bundles, `app.asar`, WASM (`\0asm`), JS AST | Browser JS & WebAssembly (AST deobf, Wasm-to-C) | [01-static-architectures/browser-js-wasm.md](references/01-static-architectures/browser-js-wasm.md) |
 | Flash dumps (`.bin`), SquashFS (`hsqs`), U-Boot (`0x27051956`) | Embedded Firmware & IoT (MIPS/ARM, carving, RTOS) | [01-static-architectures/firmware-iot.md](references/01-static-architectures/firmware-iot.md) |

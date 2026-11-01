@@ -824,9 +824,16 @@ def triage_file(filepath: str) -> dict:
         or b"libil2cpp.so" in sample_data
         or b"global-metadata.dat" in sample_data
         or header.startswith(b"\xaf\x1b\xb1\xfa")
+        or header.startswith(b"\xaf\x1b\xb1\xea")
     ):
         result["runtime"] = "Unity IL2CPP"
         result["indicators"].append("Found Unity IL2CPP strings or global-metadata signature")
+        if header.startswith(b"\xaf\x1b\xb1\xea"):
+            result["indicators"].append(
+                "Variant metadata magic AF 1B B1 EA. The version word still applies. "
+                "A sane version with section ranges past EOF is a header permutation, "
+                "not a failed magic patch. See unity-il2cpp.md section 4.5."
+            )
         result["recommended_reference"] = "references/01-static-architectures/unity-il2cpp.md"
         result["category"] = "01-static-architectures"
         return result
