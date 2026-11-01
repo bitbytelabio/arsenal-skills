@@ -96,7 +96,7 @@ The triage scanner inspects file magic, sections, and runtime strings to output 
 
 To prevent context window saturation, analysis guidance is partitioned into four hierarchical categories. **Load only the specific reference file required for the identified target architecture, dynamic execution mode, analysis objective, or tool workflow.**
 
-This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and macOS, Unity, Flutter, React Native, browser JS and extensions, firmware and debug ports, malware containment, protocols, crypto, patch diffing, and fuzzing used as a reversing oracle. It does not absorb penetration testing, Active Directory, cloud or Kubernetes, exploit development, EDR evasion, wireless, email, or SSO. It also does not strip license checks to avoid paying, build cheats for online games, or make malware harder for a defender to recognize. Documenting how a check works is in scope. Unity IL2CPP samples still use the IL2CPP reference.
+This skill covers reversing domains: native, Go, Rust, .NET, Android, iOS and macOS, Unity, Flutter, React Native, browser JS and extensions, firmware and debug ports, malware containment, protocols, crypto, patch diffing, and fuzzing used as a reversing oracle.
 
 ### 1. Static Architectures (`references/01-static-architectures/`)
 
